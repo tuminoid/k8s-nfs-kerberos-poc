@@ -1,30 +1,35 @@
 #!/usr/bin/env bash
 
-set -eu
+set -euo pipefail
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+# Color codes
+readonly RED='\033[0;31m'
+readonly GREEN='\033[0;32m'
+readonly YELLOW='\033[1;33m'
+readonly NC='\033[0m'
 
-echo -e "${YELLOW}Starting Kubernetes cluster cleanup...${NC}"
+# Color print functions
+print_red() { echo -e "${RED}$*${NC}"; }
+print_green() { echo -e "${GREEN}$*${NC}"; }
+print_yellow() { echo -e "${YELLOW}$*${NC}"; }
+
+print_yellow "Starting Kubernetes cluster cleanup..."
 
 # Reset Kubernetes cluster
-echo -e "${YELLOW}Resetting Kubernetes cluster with kubeadm...${NC}"
+print_yellow "Resetting Kubernetes cluster with kubeadm..."
 sudo kubeadm reset -f --cleanup-tmp-dir
 
 # Stop and disable kubelet
-echo -e "${YELLOW}Stopping kubelet service...${NC}"
+print_yellow "Stopping kubelet service..."
 sudo systemctl stop kubelet || true
 
 # Remove Kubernetes data (but leave containerd alone)
-echo -e "${YELLOW}Cleaning up Kubernetes data...${NC}"
+print_yellow "Cleaning up Kubernetes data..."
 sudo rm -rf /var/lib/kubelet/
 sudo rm -rf /var/lib/etcd/
 
 # Remove Calico-related files
-echo -e "${YELLOW}Removing Calico CNI configurations...${NC}"
+print_yellow "Removing Calico CNI configurations..."
 sudo rm -f /etc/cni/net.d/10-calico.conflist
 sudo rm -f /etc/cni/net.d/calico-kubeconfig
 sudo rm -rf /var/log/calico/
@@ -49,17 +54,26 @@ for cali in $(ip link 2>/dev/null | grep cali | cut -f2 -d" " | cut -f1 -d@ || t
 done
 
 # Clean up Kubernetes configurations
-echo -e "${YELLOW}Cleaning up Kubernetes configurations...${NC}"
+print_yellow "Cleaning up Kubernetes configurations..."
 sudo rm -rf /etc/kubernetes/
 sudo rm -rf ~/.kube/
 sudo rm -f kubeadm-config.yaml
 sudo rm -f /tmp/kubeadm-config.yaml
 
+# clear local users created for testing
+print_yellow "Removing local test users..."
+for user in user10002 user10003 user10004; do
+    sudo deluser --remove-home "${user}" || true
+done
+
+# clear local groups created for testing
+print_yellow "Removing local test groups..."
+for group in group5002 group5003 group5004; do
+    sudo delgroup "${group}" || true
+done
+
 # Clean up logs
-echo -e "${YELLOW}Cleaning up Kubernetes logs...${NC}"
+print_yellow "Cleaning up Kubernetes logs..."
 sudo journalctl --rotate --vacuum-time=1s --unit=kubelet.service
 
-echo -e "${GREEN}"
-echo "=================================================================="
-echo "Kubernetes Cluster Cleanup Complete"
-echo "${NC}"
+print_green "Kubernetes Cluster Cleanup Complete"

@@ -4,11 +4,6 @@ metadata:
   name: client-user10003-kcm
   namespace: default
 spec:
-  hostAliases:
-  - ip: "10.1.0.25"
-    hostnames:
-    - "kdc.example.com"
-    - "nfs.example.com"
   securityContext:
     runAsUser: 10003
     runAsGroup: 5003
@@ -18,15 +13,31 @@ spec:
   - name: krb5-sidecar
     image: krb5-sidecar:latest
     imagePullPolicy: Never
+    securityContext:
+      runAsUser: 10003
+      runAsGroup: 5003
     env:
     - name: KRB5CCNAME
       value: "KCM:"
     - name: KERBEROS_USER
       value: "user10003"
     - name: KERBEROS_REALM
-      value: "EXAMPLE.COM"
+      valueFrom:
+        configMapKeyRef:
+          name: service-hostnames
+          key: KERBEROS_REALM
+    - name: KDC_HOSTNAME
+      valueFrom:
+        configMapKeyRef:
+          name: service-hostnames
+          key: KDC_HOSTNAME
+    - name: NFS_HOSTNAME
+      valueFrom:
+        configMapKeyRef:
+          name: service-hostnames
+          key: NFS_HOSTNAME
     - name: KERBEROS_RENEWAL_TIME
-      value: "3600"  # 1 hour for testing
+      value: "300"  # 5 min for testing
     volumeMounts:
     - name: keytabs
       mountPath: /etc/keytabs
@@ -36,8 +47,6 @@ spec:
       readOnly: true
     - name: kcm-socket
       mountPath: /var/run/.heim_org.h5l.kcm-socket
-    - name: rpc-pipefs
-      mountPath: /var/lib/nfs/rpc_pipefs
     lifecycle:
       preStop:
         exec:
@@ -55,32 +64,32 @@ spec:
     - name: KERBEROS_USER
       value: "user10003"
     - name: KERBEROS_REALM
-      value: "EXAMPLE.COM"
-    command: ["/bin/bash", "-c"]
-    args:
-      - |
-        echo "Starting NFS client container with KCM..."
-        echo "Waiting for sidecar to authenticate..."
-        sleep 10
-        echo "Checking KCM credentials..."
-        export KRB5CCNAME=KCM:
-        klist || echo "No credentials yet"
-        echo "Testing NFS access..."
-        ls -la /home/ && echo "SUCCESS: Can list NFS directory" || echo "Cannot access NFS directory"
-        echo "Testing NFS write..."
-        echo "KCM Test: Written by user10003 at $(date)" > /home/kcm-test.txt && echo "SUCCESS: Can write to NFS" || echo "Cannot write to NFS"
-        echo "Container ready. Keeping alive..."
-        while true; do sleep 30; done
+      valueFrom:
+        configMapKeyRef:
+          name: service-hostnames
+          key: KERBEROS_REALM
+    - name: KDC_HOSTNAME
+      valueFrom:
+        configMapKeyRef:
+          name: service-hostnames
+          key: KDC_HOSTNAME
+    - name: NFS_HOSTNAME
+      valueFrom:
+        configMapKeyRef:
+          name: service-hostnames
+          key: NFS_HOSTNAME
+    command: ["/usr/local/bin/entrypoint.sh"]
     volumeMounts:
     - name: nfs-home
       mountPath: /home
+    - name: keytabs
+      mountPath: /etc/keytabs
+      readOnly: true
     - name: krb5-config
       mountPath: /etc/krb5.conf
       readOnly: true
     - name: kcm-socket
       mountPath: /var/run/.heim_org.h5l.kcm-socket
-    - name: rpc-pipefs
-      mountPath: /var/lib/nfs/rpc_pipefs
   volumes:
   - name: nfs-home
     persistentVolumeClaim:
@@ -97,8 +106,4 @@ spec:
     hostPath:
       path: /var/run/.heim_org.h5l.kcm-socket
       type: Socket
-  - name: rpc-pipefs
-    hostPath:
-      path: /var/lib/nfs/rpc_pipefs
-      type: Directory
   restartPolicy: Always
