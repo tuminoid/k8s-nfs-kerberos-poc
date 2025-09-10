@@ -4,11 +4,6 @@ metadata:
   name: client-user10002-kcm
   namespace: default
 spec:
-  hostAliases:
-  - ip: "10.1.0.25"
-    hostnames:
-    - "kdc.example.com"
-    - "nfs.example.com"
   securityContext:
     runAsUser: 10002
     runAsGroup: 5002
@@ -27,7 +22,20 @@ spec:
     - name: KERBEROS_USER
       value: "user10002"
     - name: KERBEROS_REALM
-      value: "EXAMPLE.COM"
+      valueFrom:
+        configMapKeyRef:
+          name: service-hostnames
+          key: KERBEROS_REALM
+    - name: KDC_HOSTNAME
+      valueFrom:
+        configMapKeyRef:
+          name: service-hostnames
+          key: KDC_HOSTNAME
+    - name: NFS_HOSTNAME
+      valueFrom:
+        configMapKeyRef:
+          name: service-hostnames
+          key: NFS_HOSTNAME
     - name: KERBEROS_RENEWAL_TIME
       value: "300"  # 5 min for testing
     volumeMounts:
@@ -56,11 +64,30 @@ spec:
     - name: KERBEROS_USER
       value: "user10002"
     - name: KERBEROS_REALM
-      value: "EXAMPLE.COM"
+      valueFrom:
+        configMapKeyRef:
+          name: service-hostnames
+          key: KERBEROS_REALM
+    - name: KDC_HOSTNAME
+      valueFrom:
+        configMapKeyRef:
+          name: service-hostnames
+          key: KDC_HOSTNAME
+    - name: NFS_HOSTNAME
+      valueFrom:
+        configMapKeyRef:
+          name: service-hostnames
+          key: NFS_HOSTNAME
     command: ["/usr/local/bin/entrypoint.sh"]
     volumeMounts:
     - name: nfs-home
       mountPath: /home
+    - name: keytabs
+      mountPath: /etc/keytabs
+      readOnly: true
+    - name: krb5-config
+      mountPath: /etc/krb5.conf
+      readOnly: true
     - name: kcm-socket
       mountPath: /var/run/.heim_org.h5l.kcm-socket
   volumes:

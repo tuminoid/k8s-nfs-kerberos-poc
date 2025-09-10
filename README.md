@@ -1,19 +1,56 @@
 # NFSv4 + Kerberos in Kubernetes
 
-Single-node kubeadm cluster with NFSv4 + Kerberos authentication using KCM sidecar pattern.
+Multi-machine kubeadm cluster with NFSv4 + Kerberos authentication using KCM sidecar pattern.
 
-## Quickstart
+## Multi-Machine Quickstart
 
 ```bash
-make setup    # Install KDC + NFS + K8s prereqs
-make deploy   # Deploy cluster + applications
-make test     # Validate everything works
+# On KDC machine (192.168.1.10):
+sudo ./vm-scripts/install-kdc.sh nfs-192.168.1.11.nip.io
+
+# On NFS machine (192.168.1.11):
+sudo ./vm-scripts/install-nfs.sh kdc-192.168.1.10.nip.io
+
+# On K8s machine (192.168.1.12):
+sudo ./vm-scripts/setup-k8s-node.sh kdc-192.168.1.10.nip.io nfs-192.168.1.11.nip.io
+
+# Deploy applications on K8s machine:
+make deploy KDC=kdc-192.168.1.10.nip.io NFS=nfs-192.168.1.11.nip.io
+
+# Test everything:
+make test
+```
+
+## Single-Machine Quickstart (Legacy)
+
+```bash
+make single-node-setup    # Install KDC + NFS + K8s prereqs
+make deploy               # Auto-detects local IP for nip.io hostnames
+make test                 # Validate everything works
 ```
 
 ## Requirements
 
-- Ubuntu 24.04 VM with ens3 interface
-- Root access, 4GB RAM, 50GB disk
+- Ubuntu 24.04 VMs with ens3 interface
+- Root access, 4GB RAM, 50GB disk per machine
+- Network connectivity between machines
+
+## Architecture
+
+**Multi-machine setup:**
+- **KDC machine**: Kerberos KDC server (port 88, 8080)
+- **NFS machine**: NFS server with Kerberos (port 2049, sec=krb5)
+- **K8s machine**: Kubernetes node with client pods
+
+**Using nip.io for hostnames:**
+- KDC: `kdc-<ip>.nip.io`
+- NFS: `nfs-<ip>.nip.io`
+- K8s: `k8s-<ip>.nip.io`
+
+**ConfigMap-based configuration:**
+- Hostnames injected via configmaps (no /etc/hosts modification)
+- Dynamic PV generation with correct NFS server
+- Environment variables from configmaps in pods
 
 ## What Gets Deployed
 
@@ -44,10 +81,31 @@ otherwise it is stale mount.
 ```bash
 make status   # Check what's running
 make clean    # Clean K8s only (keeps NFS + KDC)
-make deploy   # Redeploy cluster
+make deploy KDC=<kdc_hostname> NFS=<nfs_hostname>  # Redeploy cluster
 ```
 
 ## Files
+
+**VM Setup Scripts:**
+- `vm-scripts/install-kdc.sh` - KDC server setup (requires nfs_hostname)
+- `vm-scripts/install-nfs.sh` - NFS server setup (requires kdc_hostname)
+- `vm-scripts/setup-k8s-node.sh` - K8s node setup (requires kdc_hostname, nfs_hostname)
+
+**Deployment:**
+- `deploy-k8s.sh` - K8s deployment (requires kdc_hostname, nfs_hostname)
+
+**Manifests:**
+- `k8s-manifests/client-user*-kcm.yaml` - Pod manifests using configmaps
+- `k8s-manifests/pvc-user*.yaml` - PVC manifests
+- `k8s-manifests/storageclass.yaml` - Storage class
+- PVs are generated dynamically with correct NFS hostname
+
+**Key Changes from Original:**
+- Uses nip.io hostnames instead of /etc/hosts
+- ConfigMaps for dynamic hostname configuration
+- PVs generated dynamically in deploy script
+- Scripts take hostname parameters for multi-machine setup
+- No modification of committed git manifests
 
 - `vm-scripts/`: KDC and NFS server setup
 - `k8s-manifests/`: PV, PVC, pod definitions

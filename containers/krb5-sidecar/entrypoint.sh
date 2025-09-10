@@ -29,8 +29,6 @@ while true; do
     kinit -R || {
         echo "Renewal failed, getting fresh ticket..."
         kinit -k -t /etc/keytabs/${USERNAME}.keytab ${USERNAME}@${REALM}
-        echo "Re-requesting NFS service ticket after renewal..."
-        kvno nfs/nfs.example.com@${REALM} || echo "Warning: Could not get NFS service ticket"
     }
     echo "Credentials renewed. Current tickets:"
     klist

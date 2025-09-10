@@ -1,37 +1,48 @@
 #!/usr/bin/env bash
-# Ubuntu 24.04 Kerberos KDC Installation Script
-# Run this on a dedicated VM for the KDC server
 
-set -eu
+# This script installs and configures MIT Kerberos KDC
 
-if [ "$(id -u)" -ne 0 ]; then
-    echo "ERROR: This script must be run as root"
-    exit 1
-fi
+set -euo pipefail
+
+# Color codes
+readonly RED='\033[0;31m'
+readonly GREEN='\033[0;32m'
+readonly YELLOW='\033[1;33m'
+readonly NC='\033[0m'
+
+# Color print functions
+print_red() { echo -e "${RED}$*${NC}"; }
+print_green() { echo -e "${GREEN}$*${NC}"; }
+print_yellow() { echo -e "${YELLOW}$*${NC}"; }
 
 # Auto-detect IP address from ens3 interface
 HOST_IP=$(ip addr show ens3 | grep 'inet ' | awk '{print $2}' | cut -d'/' -f1)
-if [ -z "$HOST_IP" ]; then
-    echo "ERROR: Could not detect IP address from ens3 interface"
+if [[ -z "${HOST_IP:-}" ]]; then
+    print_red "ERROR: Could not detect IP address from ens3 interface"
     exit 1
 fi
 
+# Parameters - if NFS IP is provided, use it; otherwise assume single-node setup
+NFS_SERVER_IP="${1:-$HOST_IP}"
+
+# Expand IPs to full nip.io hostnames
+KDC_HOSTNAME="kdc-${HOST_IP}.nip.io"
+NFS_HOSTNAME="nfs-${NFS_SERVER_IP}.nip.io"
+
 # Configuration
 REALM="EXAMPLE.COM"
-DOMAIN="example.com"
-KDC_SERVER="kdc.${DOMAIN}"
-NFS_SERVER="nfs.${DOMAIN}"
 ADMIN_PRINCIPAL="admin/admin"
 KDC_PASSWORD="changeme123"
 
-echo "=== Installing Kerberos KDC on Ubuntu 24.04 ==="
-echo "Detected Host IP: ${HOST_IP}"
-
-# Set up /etc/hosts entry for KDC
-echo "Setting up /etc/hosts entry for KDC..."
-sed -i "/${KDC_SERVER}/d" /etc/hosts
-echo "${HOST_IP} ${KDC_SERVER}" >> /etc/hosts
-echo "✓ KDC hostname configured in /etc/hosts"
+if [[ "${NFS_SERVER_IP}" != "${HOST_IP}" ]]; then
+    echo "=== Installing Kerberos KDC on Ubuntu 24.04 (Multi-Server) ==="
+    echo "KDC IP: ${HOST_IP} -> ${KDC_HOSTNAME}"
+    echo "NFS Server IP: ${NFS_SERVER_IP} -> ${NFS_HOSTNAME}"
+else
+    echo "=== Installing Kerberos KDC on Ubuntu 24.04 (Single-Node) ==="
+    echo "Host IP: ${HOST_IP}"
+    echo "KDC/NFS Hostname: ${KDC_HOSTNAME} / ${NFS_HOSTNAME}"
+fi
 
 # Update system
 apt-get update && apt-get upgrade -y
@@ -60,9 +71,9 @@ cat > /etc/krb5.conf <<EOF
 
 [realms]
     ${REALM} = {
-        kdc = ${KDC_SERVER}
-        admin_server = ${KDC_SERVER}
-        default_domain = ${DOMAIN}
+        kdc = ${KDC_HOSTNAME}
+        admin_server = ${KDC_HOSTNAME}
+        default_domain = example.com
         database_name = /var/lib/krb5kdc/principal
         acl_file = /etc/krb5kdc/kadm5.acl
         key_stash_file = /etc/krb5kdc/stash
@@ -74,8 +85,8 @@ cat > /etc/krb5.conf <<EOF
     }
 
 [domain_realm]
-    .${DOMAIN} = ${REALM}
-    ${DOMAIN} = ${REALM}
+    .example.com = ${REALM}
+    example.com = ${REALM}
 
 [logging]
     kdc = FILE:/var/log/krb5kdc.log
@@ -93,16 +104,16 @@ cat > /etc/krb5kdc/kadm5.acl <<EOF
 admin/admin@${REALM}    *
 kadmin/admin@${REALM}    *
 kadmin/changepw@${REALM}    *
-kadmin/${KDC_SERVER}@${REALM}    *
+kadmin/${KDC_HOSTNAME}@${REALM}    *
 EOF
 
 # Initialize KDC database
-if [ -f /var/lib/krb5kdc/principal ]; then
-    echo "KDC database already exists, removing and recreating..."
+if [[ -f "/var/lib/krb5kdc/principal" ]]; then
+    print_yellow "KDC database already exists, removing and recreating..."
     systemctl stop krb5-kdc krb5-admin-server || true
     rm -rf /var/lib/krb5kdc/*
 fi
-echo "Creating KDC database..."
+print_yellow "Creating KDC database..."
 printf '%s\n%s\n' "${KDC_PASSWORD}" "${KDC_PASSWORD}" | kdb5_util create -s
 
 # Start KDC services
@@ -112,16 +123,16 @@ systemctl start krb5-kdc
 systemctl start krb5-admin-server
 
 # Create admin principal
-echo "Creating admin principal..."
+print_yellow "Creating admin principal..."
 printf '%s\n%s\n' "${KDC_PASSWORD}" "${KDC_PASSWORD}" | kadmin.local -q "addprinc ${ADMIN_PRINCIPAL}"
 
 # Create NFS service principal
-echo "Creating NFS service principal..."
-kadmin.local -q "addprinc -randkey nfs/${NFS_SERVER}@${REALM}"
-kadmin.local -q "addprinc -randkey nfs/${HOST_IP}@${REALM}"
+print_yellow "Creating NFS service principal..."
+kadmin.local -q "addprinc -randkey nfs/${NFS_HOSTNAME}@${REALM}"
+kadmin.local -q "addprinc -randkey nfs/${NFS_SERVER_IP}@${REALM}"
 
 # Create user principals with specific passwords
-echo "Creating user principals..."
+print_yellow "Creating user principals..."
 for user in user10002 user10003 user10004; do
     echo "Creating user principal ${user}..."
     kadmin.local -q "addprinc -pw password ${user}@${REALM}"
@@ -130,50 +141,66 @@ done
 # Create keytabs directory
 mkdir -p /etc/keytabs
 chmod 755 /etc/keytabs
-
-# Clean up any existing keytabs and recreate
-echo "Cleaning up existing keytabs..."
 rm -f /etc/keytabs/*.keytab
+rm -f /etc/krb5.keytab
 
 # Export NFS service keytab
-echo "Creating NFS service keytab..."
-kadmin.local -q "ktadd -k /etc/keytabs/nfs.keytab nfs/${NFS_SERVER}@${REALM}"
-kadmin.local -q "ktadd -k /etc/keytabs/nfs.keytab nfs/${HOST_IP}@${REALM}"
+print_yellow "Creating NFS service keytab..."
+kadmin.local -q "ktadd -k /etc/keytabs/nfs.keytab nfs/${NFS_HOSTNAME}@${REALM}"
+kadmin.local -q "ktadd -k /etc/keytabs/nfs.keytab nfs/${NFS_SERVER_IP}@${REALM}"
 chmod 644 /etc/keytabs/nfs.keytab
 
 # Export user keytabs
-echo "Creating user keytabs..."
+print_yellow "Creating user keytabs..."
 for user in user10002 user10003 user10004; do
     echo "Creating user keytab for ${user}..."
     kadmin.local -q "ktadd -k /etc/keytabs/${user}.keytab ${user}@${REALM}"
-    chmod 644 /etc/keytabs/${user}.keytab
+    chmod 644 "/etc/keytabs/${user}.keytab"
 done
 
 # Set up NFS service principal for GSS authentication
-echo "Setting up NFS service principal for GSS authentication..."
-if [ -f /etc/keytabs/nfs.keytab ]; then
-    echo "Adding NFS service principal to system keytab..."
+if [[ -f "/etc/keytabs/nfs.keytab" ]]; then
+    print_yellow "Setting up NFS service principal for GSS authentication..."
     # Clean up any existing system keytab to avoid duplicates
     sudo rm -f /etc/krb5.keytab
-    kadmin.local -q "ktadd -k /etc/krb5.keytab nfs/${NFS_SERVER}@${REALM}"
-    kadmin.local -q "ktadd -k /etc/krb5.keytab nfs/${HOST_IP}@${REALM}"
+    kadmin.local -q "ktadd -k /etc/krb5.keytab nfs/${NFS_HOSTNAME}@${REALM}"
+    kadmin.local -q "ktadd -k /etc/krb5.keytab nfs/${NFS_SERVER_IP}@${REALM}"
     chmod 600 /etc/krb5.keytab
-    echo "✓ NFS service principal added to system keytab"
+    print_green "✓ NFS service principal added to system keytab"
 else
-    echo "WARNING: /etc/keytabs/nfs.keytab not found. KDC may not be set up yet."
+    print_red "WARNING: /etc/keytabs/nfs.keytab not found. KDC may not be set up yet."
 fi
 
+# Extract NFS server IP from hostname (format: nfs-IP.nip.io)
+NFS_IP=$(echo "$NFS_HOSTNAME" | sed 's/nfs-\([0-9.]*\)\.nip\.io/\1/')
+
 # Configure firewall
-echo "=== Configuring UFW firewall ==="
-ufw --force enable
-ufw allow 88/tcp    # Kerberos KDC
-ufw allow 88/udp    # Kerberos KDC
-ufw allow 749/tcp   # Kerberos admin
-ufw allow 749/udp   # Kerberos admin
-ufw allow 22/tcp    # SSH
-ufw allow from 10.0.0.0/8  # Allow internal networks
-ufw allow from 172.16.0.0/12  # Allow Docker networks
-ufw allow from 192.168.0.0/16  # Allow private networks
+if false; then
+    print_yellow "=== Configuring UFW firewall ==="
+    ufw --force enable
+
+    # KDC specific ports
+    ufw allow 88/tcp    # Kerberos KDC
+    ufw allow 88/udp    # Kerberos KDC
+    ufw allow 749/tcp   # Kerberos admin
+    ufw allow 749/udp   # Kerberos admin
+    ufw allow 22/tcp    # SSH
+
+    # Allow access from NFS server specifically
+    if [[ "${NFS_IP}" != "${NFS_HOSTNAME}" ]]; then
+        echo "Allowing access from NFS server: ${NFS_IP}"
+        ufw allow from "${NFS_IP}"
+    else
+        print_red "WARNING: Could not extract IP from NFS hostname: ${NFS_HOSTNAME}"
+        echo "Falling back to allowing private networks"
+        ufw allow from 10.0.0.0/8      # Allow internal networks
+        ufw allow from 172.16.0.0/12   # Allow Docker networks
+        ufw allow from 192.168.0.0/16  # Allow private networks
+    fi
+
+    # Open port for keytab distribution
+    ufw allow 8080/tcp
+fi
 
 # Setup log rotation
 cat > /etc/logrotate.d/krb5 <<EOF
@@ -205,12 +232,26 @@ cat > /etc/logrotate.d/krb5 <<EOF
 EOF
 
 # Create HTTP server for keytab distribution
-echo "=== Setting up HTTP server for keytab distribution ==="
+print_yellow "=== Setting up HTTP server for keytab distribution ==="
 apt-get install -y nginx
 
 # Create keytab distribution directory
 mkdir -p /var/www/html/keytabs
-cp /etc/keytabs/*.keytab /var/www/html/keytabs/
+
+# Regenerate all keytabs to ensure KVNO consistency
+print_yellow "Regenerating keytabs for HTTP distribution with current KVNOs..."
+rm -f /var/www/html/keytabs/*.keytab
+
+# Regenerate NFS keytab with current KVNO
+kadmin.local -q "ktadd -k /var/www/html/keytabs/nfs.keytab nfs/${NFS_HOSTNAME}@${REALM}"
+kadmin.local -q "ktadd -k /var/www/html/keytabs/nfs.keytab nfs/${NFS_SERVER_IP}@${REALM}"
+
+# Regenerate user keytabs with current KVNO
+for user in user10002 user10003 user10004; do
+    kadmin.local -q "ktadd -k /var/www/html/keytabs/${user}.keytab ${user}@${REALM}"
+done
+
+chmod 644 /var/www/html/keytabs/*.keytab
 cp /etc/krb5.conf /var/www/html/
 
 # Configure nginx for keytab distribution
@@ -218,6 +259,13 @@ cat > /etc/nginx/sites-available/keytabs <<EOF
 server {
     listen 8080;
     server_name _;
+
+    # Root location for directory listing
+    location / {
+        root /var/www/html;
+        autoindex on;
+        try_files \$uri \$uri/ =404;
+    }
 
     location /keytabs/ {
         root /var/www/html;
@@ -232,17 +280,23 @@ server {
 }
 EOF
 
+# Remove default nginx site and enable our keytab site
+rm -f /etc/nginx/sites-enabled/default
 ln -sf /etc/nginx/sites-available/keytabs /etc/nginx/sites-enabled/
 systemctl enable nginx
 systemctl restart nginx
 
-# Open port for keytab distribution
-ufw allow 8080/tcp
+# Verify files are accessible
+print_yellow "=== Verifying keytab files are accessible ==="
+ls -la /var/www/html/
+ls -la /var/www/html/keytabs/
+chown -R www-data:www-data /var/www/html/
+chmod -R 755 /var/www/html/
 
-echo "=== KDC Installation Complete ==="
-echo "KDC Server: ${KDC_SERVER}"
+print_green "=== KDC Installation Complete ==="
+echo "KDC Server: ${KDC_HOSTNAME}"
 echo "Realm: ${REALM}"
 echo "Admin Principal: ${ADMIN_PRINCIPAL}"
 echo "Password: ${KDC_PASSWORD}"
 echo ""
-echo "Keytabs and krb5.conf available at: http://${KDC_SERVER}:8080/"
+echo "Keytabs and krb5.conf available at: http://${KDC_HOSTNAME}:8080/"
