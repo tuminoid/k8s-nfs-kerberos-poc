@@ -46,6 +46,7 @@ fi
 
 # Configuration
 K8S_HOSTNAME="k8s-${HOST_IP}.nip.io"
+LOCAL_USERS="${LOCAL_USERS:-false}"
 
 print_yellow "=== Setting up Kubernetes Node Prerequisites ==="
 echo "Detected Host IP: ${HOST_IP}"
@@ -53,6 +54,7 @@ echo "K8s Hostname: ${K8S_HOSTNAME}"
 echo "KDC Hostname: ${KDC_HOSTNAME}"
 echo "NFS Hostname: ${NFS_HOSTNAME}"
 echo "Kubernetes Version: ${K8S_VERSION}"
+echo "Using Local Users: ${LOCAL_USERS}"
 
 # Update system
 export DEBIAN_FRONTEND=noninteractive
@@ -66,7 +68,8 @@ apt-get install -y \
     gpg \
     nfs-common \
     krb5-user \
-    keyutils
+    keyutils \
+    golang-go
 
 # Add Kubernetes signing key
 rm -f /etc/apt/keyrings/kubernetes-apt-keyring.gpg
@@ -242,7 +245,6 @@ wget -O /etc/krb5.conf "http://${KDC_HOSTNAME}:8080/krb5.conf" || {
 }
 
 # if we have static local users, do this
-LOCAL_USERS=true
 if [[ "${LOCAL_USERS}" = true ]]; then
     echo "Downloading user keytabs from KDC..."
     mkdir -p /etc/keytabs

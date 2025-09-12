@@ -100,16 +100,33 @@ make deploy KDC=<kdc_hostname> NFS=<nfs_hostname>  # Redeploy cluster
 - `k8s-manifests/storageclass.yaml` - Storage class
 - PVs are generated dynamically with correct NFS hostname
 
-**Key Changes from Original:**
+**Key Features:**
 - Uses nip.io hostnames instead of /etc/hosts
 - ConfigMaps for dynamic hostname configuration
 - PVs generated dynamically in deploy script
 - Scripts take hostname parameters for multi-machine setup
+- **NRI Integration**: Dynamic user creation via NRI hooks (when LOCAL_USERS=false)
 - No modification of committed git manifests
 
+## NRI Mode (Dynamic User Creation)
+
+When `LOCAL_USERS=false`, the system uses NRI (Node Runtime Interface) hooks to:
+- Dynamically create users when pods are scheduled
+- Download keytabs and perform Kerberos authentication before NFS mount
+- Clean up users and credentials when pods are deleted
+
+```bash
+# Enable NRI mode
+export LOCAL_USERS=false
+make deploy
+```
+
+## File Structure
+
 - `vm-scripts/`: KDC and NFS server setup
-- `k8s-manifests/`: PV, PVC, pod definitions
+- `k8s-manifests/`: PV, PVC, pod definitions, NRI configurations
 - `containers/`: Docker images for sidecar + client
+- `nri-hooks/`: NRI hook scripts for user management
 - `deploy-k8s.sh`: Full cluster deployment
 - `test.sh`: Validation suite
 

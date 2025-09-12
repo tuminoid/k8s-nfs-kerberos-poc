@@ -32,8 +32,6 @@ K8S_VERSION="${3:-1.32}"
 KDC_HOSTNAME="kdc-${KDC_SERVER_IP}.nip.io"
 NFS_HOSTNAME="nfs-${NFS_SERVER_IP}.nip.io"
 K8S_HOSTNAME="k8s-${HOST_IP}.nip.io"
-
-# Configuration using nip.io
 REALM="EXAMPLE.COM"
 
 if [[ "${KDC_SERVER_IP}" != "${HOST_IP}" ]] || [[ "${NFS_SERVER_IP}" != "${HOST_IP}" ]]; then
@@ -48,6 +46,12 @@ fi
 
 # we can provision up to 3 users
 USERS=("user10002" "user10003" "user10004")
+# or we use NRI to inject users on need
+LOCAL_USERS="${LOCAL_USERS:-false}"
+echo "Using Local Users: ${LOCAL_USERS}"
+
+# Script directory for relative paths
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Check if Kubernetes tools are installed
 if ! command -v kubectl &> /dev/null || ! command -v kubeadm &> /dev/null; then
@@ -55,7 +59,6 @@ if ! command -v kubectl &> /dev/null || ! command -v kubeadm &> /dev/null; then
     print_yellow "Please run ./vm-scripts/setup-k8s-node.sh first"
     exit 1
 fi
-
 print_green "✓ Kubernetes prerequisites detected"
 
 # Build custom NFS Kerberos client Docker image
@@ -212,39 +215,58 @@ if [[ "${KDC_HOSTNAME}" = "kdc-${HOST_IP}.nip.io" ]]; then
     # Single-node setup: host needs NFS service principal for local testing
     sudo kinit -kt /etc/krb5.keytab "nfs/${NFS_HOSTNAME}@${REALM}"
     print_green "✓ Host authenticated with NFS service principal"
-else
-    # Multi-node setup: K8s node doesn't authenticate as NFS service, only pods do
-    print_yellow "Skipping host NFS authentication (multi-node setup - pods will authenticate)"
 fi
 
 # Initialize user credentials (get initial tickets)
-# THIS IS SUPPOSED TO BE MOVED TO NRI PLUGINS
-LOCAL_USERS=true
+# Create credential caches without local users - works for both LOCAL_USERS modes
 if [[ "${LOCAL_USERS}" = true ]]; then
+    print_yellow "Creating credential caches for container users..."
     for user in "${USERS[@]}"; do
-        sudo groupadd -g "$((${user#user} - 5000))" "group$((${user#user} - 5000))" 2>/dev/null || true
-        sudo useradd -m -u "${user#user}" -g "group$((${user#user} - 5000))" "${user}" || true
-        # Use the keytab to get initial credentials for each user
-        sudo -u "${user}" kinit -k -t "/etc/keytabs/${user}.keytab" "${user}@${REALM}" || print_yellow "Warning: Failed to get initial credentials for ${user}"
-        # Set long renewal time for deployment use
-        sudo -u "${user}" kinit -R "${user}@${REALM}" 2>/dev/null || true
-    done
-    print_green "✓ Initial user credentials configured"
-else
-    # install NRI hookinjector
-    # https://github.com/containerd/nri/tree/main/plugins/hook-injector
-    print_yellow "Installing NRI hookinjector plugin..."
-    NRI_HOOKINJECTOR_RELEASE_TAG=v0.10.0
-    kubectl apply -k "github.com/containerd/nri/contrib/kustomize/hook-injector?ref=${NRI_HOOKINJECTOR_RELEASE_TAG}"
+        user_id="${user#user}"
+        group_id="$((user_id - 5000))"
 
-    # install plugin to handle keytabs etc
-    # tbd
+        print_yellow "Creating credential cache for ${user}..."
+
+        # Create credential cache as root using keytab
+        sudo KRB5CCNAME="FILE:/tmp/krb5cc_${user_id}" kinit -k -t "/etc/keytabs/${user}.keytab" "${user}@${REALM}"
+
+        # Change ownership to the correct UID/GID (works whether users exist or not)
+        sudo chown "${user_id}:${group_id}" "/tmp/krb5cc_${user_id}"
+
+        print_yellow "Created credential cache /tmp/krb5cc_${user_id} with ownership ${user_id}:${group_id}"
+    done
+    print_green "✓ User credential caches configured"
+
+else
+    # Set up OCI hooks for automatic Kerberos credential creation
+    print_yellow "Setting up NRI hooks for automatic Kerberos authentication..."
+    sudo mkdir -p /opt/nri-hooks /opt/nri/conf.d /opt/nri/plugins
+
+    print_yellow "Building NRI kerberos plugin..."
+    cd "${SCRIPT_DIR}"/nri-plugin
+    go build ./kerberos.go
+
+    # Install the hook-injector plugin
+    sudo cp ./kerberos /opt/nri/plugins/10-kerberos
+    sudo chmod +x /opt/nri/plugins/10-kerberos
+    cd ..
+
+    # Copy hook scripts to host
+    sudo cp "${SCRIPT_DIR}"/nri-hooks/kerberos*.json /etc/containers/oci/hooks.d/
+    # not sure we need this?
+    sudo cp "${SCRIPT_DIR}/nri-hooks/kerberos.sh" /opt/nri-hooks/
+    sudo chmod +x /opt/nri-hooks/*.sh
+
+    # Create configuration file
+    sudo systemctl restart containerd
+    print_green "✓ NRI hooks configured and containerd restarted"
 fi
 
 # Initialize system credentials for immediate use (service should be set up by setup script)
 print_yellow "Initializing system credentials for NFS operations..."
 export KRB5CCNAME=FILE:/tmp/krb5cc_0
 sudo -E kinit -k -t /etc/krb5.keytab "nfs/${NFS_HOSTNAME}@${REALM}" 2>/dev/null || true
+unset KRB5CCNAME
 
 # Start the system credentials service if keytab is available
 sudo systemctl start kerberos-system-creds 2>/dev/null || true

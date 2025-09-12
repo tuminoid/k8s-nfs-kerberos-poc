@@ -72,6 +72,18 @@ for group in group5002 group5003 group5004; do
     sudo delgroup "${group}" || true
 done
 
+# Clean up OCI hooks and related files
+print_yellow "Cleaning up OCI hooks and state files..."
+sudo rm -rf /opt/nri-hooks/
+sudo rm -f /var/log/nri-kerberos.log
+sudo rm -f /etc/containers/oci/hooks.d/kerberos-*.json
+sudo rm -f /opt/nri/plugins/10-kerberos
+
+# Clean up Kerberos credential caches
+print_yellow "Cleaning up Kerberos credential caches..."
+sudo rm -f /tmp/krb5cc_*
+print_yellow "Note: This removes ALL credential caches including system ones - they will be recreated on next deploy"
+
 # Clean up logs
 print_yellow "Cleaning up Kubernetes logs..."
 sudo journalctl --rotate --vacuum-time=1s --unit=kubelet.service

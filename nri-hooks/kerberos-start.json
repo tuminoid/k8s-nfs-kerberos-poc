@@ -1,0 +1,19 @@
+{
+    "version": "1.0.0",
+    "hook": {
+        "path": "/opt/nri-hooks/kerberos.sh",
+        "args": [
+            "/opt/nri-hooks/kerberos.sh"
+        ],
+        "env": [],
+        "timeout": 30
+    },
+    "when": {
+        "annotations": {
+            "^nri.io/kerberos-auth$": "enabled"
+        }
+    },
+    "stages": [
+        "prestart"
+    ]
+}

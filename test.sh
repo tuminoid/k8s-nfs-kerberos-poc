@@ -236,6 +236,93 @@ test_service_health() {
     print_success "Service health test PASSED"
 }
 
+test_nri_integration() {
+    print_header "Testing NRI Integration"
+
+    # Check if NRI is enabled
+    echo "Checking NRI configuration..."
+    if sudo grep -q "disable = false" /etc/containerd/config.toml && \
+       sudo grep -A5 -B5 "nri" /etc/containerd/config.toml | grep -q "disable = false"; then
+        print_success "NRI is enabled in containerd"
+    else
+        print_error "NRI is not properly enabled in containerd"
+        return 1
+    fi
+
+    # Check if NRI hook injector is running
+    echo "Checking NRI hook injector..."
+    if kubectl get pods -n nri-hook-injector-system -l app=nri-hook-injector --no-headers 2>/dev/null | grep -q Running; then
+        print_success "NRI hook injector is running"
+    else
+        print_error "NRI hook injector is not running"
+        return 1
+    fi
+
+    # Check if hook deployer is running on all nodes
+    echo "Checking hook deployer..."
+    if kubectl get daemonset -n nri-hook-injector-system nri-kerberos-hook-deployer 2>/dev/null >/dev/null; then
+        local desired=$(kubectl get daemonset -n nri-hook-injector-system nri-kerberos-hook-deployer -o jsonpath='{.status.desiredNumberScheduled}')
+        local ready=$(kubectl get daemonset -n nri-hook-injector-system nri-kerberos-hook-deployer -o jsonpath='{.status.numberReady}')
+        if [[ "$desired" == "$ready" ]] && [[ "$ready" -gt 0 ]]; then
+            print_success "Hook deployer is running on all nodes ($ready/$desired)"
+        else
+            print_error "Hook deployer not ready ($ready/$desired)"
+            return 1
+        fi
+    else
+        print_error "Hook deployer DaemonSet does not exist"
+        return 1
+    fi
+
+    # Check if hook scripts are deployed
+    echo "Checking hook script deployment..."
+    if [[ -f /opt/nri-hooks/pre-create-user.sh ]] && [[ -f /opt/nri-hooks/post-stop-cleanup.sh ]]; then
+        print_success "Hook scripts are deployed to filesystem"
+        echo "  Pre-create hook: $(ls -la /opt/nri-hooks/pre-create-user.sh)"
+        echo "  Post-stop hook: $(ls -la /opt/nri-hooks/post-stop-cleanup.sh)"
+    else
+        print_error "Hook scripts are not deployed to filesystem"
+        return 1
+    fi
+
+    # Check if users were created by NRI hooks (for existing pods)
+    echo "Checking NRI-created users..."
+    local users_created=0
+    for user in "${USERS[@]}"; do
+        if id "${user}" 2>/dev/null >/dev/null; then
+            if [[ -f "/var/lib/nri-kerberos/${user}.created" ]]; then
+                print_success "User ${user} was created by NRI"
+                users_created=$((users_created + 1))
+            else
+                echo "  User ${user} exists but not created by NRI (pre-existing or manual)"
+            fi
+        fi
+    done
+
+    if [[ $users_created -gt 0 ]]; then
+        print_success "Found $users_created NRI-created users"
+    else
+        print_warning "No NRI-created users found (pods may not be running yet)"
+    fi
+
+    # Check NRI logs
+    echo "Checking NRI logs..."
+    if [[ -f /var/log/nri-kerberos.log ]]; then
+        local log_entries=$(wc -l < /var/log/nri-kerberos.log)
+        if [[ $log_entries -gt 0 ]]; then
+            print_success "NRI log file exists with $log_entries entries"
+            echo "Recent NRI activity:"
+            tail -5 /var/log/nri-kerberos.log | sed 's/^/  /'
+        else
+            print_warning "NRI log file exists but is empty"
+        fi
+    else
+        print_warning "NRI log file does not exist yet"
+    fi
+
+    print_success "NRI integration test PASSED"
+}
+
 cleanup_test_files() {
     print_header "Cleaning up test files"
 
@@ -257,9 +344,23 @@ run_all_tests() {
     local tests_failed=0
     local critical_failure=false
 
+    # Check if we're using NRI (LOCAL_USERS=false)
+    local using_nri=false
+    if [[ "${LOCAL_USERS:-}" = "false" ]]; then
+        using_nri=true
+    fi
+
     # List of core test functions (must pass for system to be functional)
     local core_test_functions=(
         "test_service_health"
+    )
+
+    # Add NRI-specific tests if using NRI
+    if [[ "$using_nri" = "true" ]]; then
+        core_test_functions+=("test_nri_integration")
+    fi
+
+    core_test_functions+=(
         "test_pod_status"
         "test_kerberos_authentication"
         "test_nfs_mount_access"
@@ -331,6 +432,7 @@ if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
     echo ""
     echo "Test functions (can be run individually):"
     echo "  test_service_health        - Test KDC, NFS, and GSS services"
+    echo "  test_nri_integration       - Test NRI hook integration (when using NRI)"
     echo "  test_pod_status           - Test Kubernetes pod status"
     echo "  test_kerberos_authentication - Test Kerberos ticket acquisition"
     echo "  test_nfs_mount_access     - Test NFS mount accessibility"
