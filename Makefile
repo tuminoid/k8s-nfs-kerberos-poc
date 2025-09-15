@@ -3,59 +3,76 @@
 # This Makefile provides convenient targets for setting up, deploying,
 # testing, and managing the NFS Kerberos POC environment across multiple machines.
 
-.PHONY: all help single-node-setup deploy test clean realclean status
+.PHONY: all help install deploy test clean realclean status
 
 all: help
+
+# Install prerequisites for specific role on current machine
+install:
+	@echo "=== Installing Prerequisites ==="
+	@if [ -z "$(ROLE)" ]; then \
+		echo "ERROR: ROLE parameter is required"; \
+		echo "Usage: make install KDC=<kdc_ip> NFS=<nfs_ip> K8S=<k8s_ip> ROLE=<role>"; \
+		echo "Roles: kdc, nfs, k8s"; \
+		echo "Examples:"; \
+		echo "  make install KDC=192.168.1.10 NFS=192.168.1.11 K8S=192.168.1.12 ROLE=kdc"; \
+		echo "  make install KDC=192.168.1.10 NFS=192.168.1.11 K8S=192.168.1.12 ROLE=nfs"; \
+		echo "  make install KDC=192.168.1.10 NFS=192.168.1.11 K8S=192.168.1.12 ROLE=k8s"; \
+		exit 1; \
+	fi
+	@if [ "$(ROLE)" = "kdc" ]; then \
+		if [ -z "$(NFS)" ]; then \
+			echo "ERROR: NFS IP required for KDC installation"; \
+			echo "Usage: make install KDC=<kdc_ip> NFS=<nfs_ip> K8S=<k8s_ip> ROLE=kdc"; \
+			exit 1; \
+		fi; \
+		echo "Installing KDC server..."; \
+		sudo ./vm-scripts/install-kdc.sh "$(NFS)"; \
+	elif [ "$(ROLE)" = "nfs" ]; then \
+		if [ -z "$(KDC)" ] || [ -z "$(K8S)" ]; then \
+			echo "ERROR: KDC and K8S IPs required for NFS installation"; \
+			echo "Usage: make install KDC=<kdc_ip> NFS=<nfs_ip> K8S=<k8s_ip> ROLE=nfs"; \
+			exit 1; \
+		fi; \
+		echo "Installing NFS server..."; \
+		sudo ./vm-scripts/install-nfs.sh "$(KDC)" "$(K8S)"; \
+	elif [ "$(ROLE)" = "k8s" ]; then \
+		if [ -z "$(KDC)" ] || [ -z "$(NFS)" ]; then \
+			echo "ERROR: KDC and NFS IPs required for Kubernetes installation"; \
+			echo "Usage: make install KDC=<kdc_ip> NFS=<nfs_ip> K8S=<k8s_ip> ROLE=k8s"; \
+			exit 1; \
+		fi; \
+		echo "Installing Kubernetes prerequisites..."; \
+		sudo ./vm-scripts/install-k8s.sh "$(KDC)" "$(NFS)"; \
+	else \
+		echo "ERROR: Invalid ROLE '$(ROLE)'. Valid roles: kdc, nfs, k8s"; \
+		exit 1; \
+	fi
+	@echo "✓ Installation complete for role: $(ROLE)"
 
 # Default target - show available targets
 help:
 	@echo "Kubernetes NFS Kerberos POC - Available Targets:"
 	@echo ""
-	@echo "Multi-machine setup:"
-	@echo "  On KDC machine:     sudo ./vm-scripts/install-kdc.sh <nfs_ip>"
-	@echo "  On NFS machine:     sudo ./vm-scripts/install-nfs.sh <kdc_ip> <k8s_ip>"
-	@echo "  On K8s machine:     sudo ./vm-scripts/setup-k8s-node.sh <kdc_ip> <nfs_ip>"
-	@echo ""
-	@echo "Single-machine setup (legacy):"
-	@echo "  single-node-setup  - Install and configure all prerequisites on one machine"
+	@echo "Setup:"
+	@echo "  install    - Install prerequisites for specific role"
+	@echo "               Usage: make install KDC=<kdc_ip> NFS=<nfs_ip> K8S=<k8s_ip> ROLE=<role>"
+	@echo "               Roles: kdc, nfs, k8s"
+	@echo "               Example: make install KDC=192.168.1.10 NFS=192.168.1.11 K8S=192.168.1.12 ROLE=kdc"
 	@echo ""
 	@echo "Deployment and testing:"
 	@echo "  deploy     - Deploy Kubernetes cluster and NFS applications"
-	@echo "               Single-node: make deploy (auto-detects local IP)"
-	@echo "               Multi-node:  make deploy KDC=<kdc_ip> NFS=<nfs_ip>"
+	@echo "               Usage: make deploy KDC=<kdc_ip> NFS=<nfs_ip>"
 	@echo "  test       - Run comprehensive test suite to validate deployment"
 	@echo "  status     - Show current status of all services and pods"
 	@echo "  clean      - Clean up Kubernetes resources only"
 	@echo "  realclean  - Clean up everything (Kubernetes + NFS + Kerberos)"
 	@echo ""
 
-# Set up all prerequisites (KDC, NFS server, Kubernetes node) - single machine
-single-node-setup:
-	@echo "=== Setting up NFS Kerberos POC Prerequisites (Single Machine) ==="
-	@echo "Installing all components on current machine..."
-	@echo ""
-	@echo "Step 1/3: Installing Kerberos KDC..."
-	sudo ./vm-scripts/install-kdc.sh
-	@echo ""
-	@echo "Step 2/3: Installing NFS server..."
-	sudo ./vm-scripts/install-nfs.sh
-	@echo ""
-	@echo "Step 3/3: Setting up Kubernetes node prerequisites..."
-	sudo ./vm-scripts/setup-k8s-node.sh
-	@echo ""
-	@echo "✓ Prerequisites setup complete!"
-
 # Deploy Kubernetes cluster and applications
 deploy:
 	@echo "=== Deploying Kubernetes NFS Kerberos Applications ==="
-	@if [ -z "$(KDC)" ] && [ -z "$(NFS)" ]; then \
-		echo "No KDC/NFS IPs provided, using single-node setup..."; \
-		if ! command -v kubectl >/dev/null 2>&1; then \
-			echo "ERROR: kubectl not found. Run 'make single-node-setup' first."; \
-			exit 1; \
-		fi; \
-		./deploy-k8s.sh; \
-	elif [ -z "$(KDC)" ] || [ -z "$(NFS)" ]; then \
+	@if [ -z "$(KDC)" ] || [ -z "$(NFS)" ]; then \
 		echo "ERROR: Both KDC and NFS IP addresses must be provided for multi-server deployment"; \
 		echo "Usage: make deploy KDC=<kdc_ip> NFS=<nfs_ip>"; \
 		echo "Example: make deploy KDC=192.168.1.10 NFS=192.168.1.11"; \

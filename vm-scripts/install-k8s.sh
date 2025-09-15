@@ -2,7 +2,7 @@
 
 # Ubuntu 24.04 Kubernetes Node Prerequisites Setup
 # Run this to install Docker, containerd, kubectl, and prepare the node for Kubernetes
-# Usage: ./setup-k8s-node.sh [kdc_server_ip] [nfs_server_ip] [k8s_version]
+# Usage: ./install-k8s.sh [kdc_server_ip] [nfs_server_ip] [k8s_version]
 
 set -euo pipefail
 
@@ -24,29 +24,28 @@ if [[ -z "${HOST_IP:-}" ]]; then
     exit 1
 fi
 
-# Parameters - if KDC/NFS IPs are provided, use them; otherwise assume single-node setup
-KDC_SERVER_IP="${1:-$HOST_IP}"
-NFS_SERVER_IP="${2:-$HOST_IP}"
+# Parameters - KDC and NFS IPs are required for multi-server setup
+if [[ -z "${1:-}" ]] || [[ -z "${2:-}" ]]; then
+    print_red "ERROR: KDC and NFS server IPs are required"
+    echo "Usage: $0 <kdc_server_ip> <nfs_server_ip> [k8s_version]"
+    exit 1
+fi
+
+KDC_SERVER_IP="$1"
+NFS_SERVER_IP="$2"
 K8S_VERSION="${3:-1.32}"
 
 # Expand IPs to full nip.io hostnames
 KDC_HOSTNAME="kdc-${KDC_SERVER_IP}.nip.io"
 NFS_HOSTNAME="nfs-${NFS_SERVER_IP}.nip.io"
 
-if [[ "${KDC_SERVER_IP}" != "${HOST_IP}" ]] || [[ "${NFS_SERVER_IP}" != "${HOST_IP}" ]]; then
-    print_yellow "=== Setting up Kubernetes Node Prerequisites (Multi-Server) ==="
-    echo "K8S IP: ${HOST_IP}"
-    echo "KDC Server IP: ${KDC_SERVER_IP} -> ${KDC_HOSTNAME}"
-    echo "NFS Server IP: ${NFS_SERVER_IP} -> ${NFS_HOSTNAME}"
-else
-    print_yellow "=== Setting up Kubernetes Node Prerequisites (Single-Node) ==="
-    echo "Host IP: ${HOST_IP}"
-    echo "KDC/NFS Hostname: ${KDC_HOSTNAME} / ${NFS_HOSTNAME}"
-fi
+print_yellow "=== Setting up Kubernetes Node Prerequisites (Multi-Server) ==="
+echo "K8S IP: ${HOST_IP}"
+echo "KDC Server IP: ${KDC_SERVER_IP} -> ${KDC_HOSTNAME}"
+echo "NFS Server IP: ${NFS_SERVER_IP} -> ${NFS_HOSTNAME}"
 
 # Configuration
 K8S_HOSTNAME="k8s-${HOST_IP}.nip.io"
-LOCAL_USERS="${LOCAL_USERS:-false}"
 
 print_yellow "=== Setting up Kubernetes Node Prerequisites ==="
 echo "Detected Host IP: ${HOST_IP}"
@@ -54,7 +53,6 @@ echo "K8s Hostname: ${K8S_HOSTNAME}"
 echo "KDC Hostname: ${KDC_HOSTNAME}"
 echo "NFS Hostname: ${NFS_HOSTNAME}"
 echo "Kubernetes Version: ${K8S_VERSION}"
-echo "Using Local Users: ${LOCAL_USERS}"
 
 # Update system
 export DEBIAN_FRONTEND=noninteractive
@@ -234,7 +232,8 @@ print_green "✓ Local node configured for NFS with Kerberos support"
 
 # Download Kerberos configuration from KDC
 print_yellow "Downloading Kerberos configuration from KDC..."
-# Clean up any existing Kerberos files first
+# Create keytabs directory and clean up any existing Kerberos files
+mkdir -p /etc/keytabs
 rm -f /etc/krb5.conf
 rm -f /etc/keytabs/*.keytab
 echo "Downloading krb5.conf from http://${KDC_HOSTNAME}:8080/"
@@ -244,66 +243,8 @@ wget -O /etc/krb5.conf "http://${KDC_HOSTNAME}:8080/krb5.conf" || {
     exit 1
 }
 
-# if we have static local users, do this
-if [[ "${LOCAL_USERS}" = true ]]; then
-    echo "Downloading user keytabs from KDC..."
-    mkdir -p /etc/keytabs
-    for user in user10002 user10003 user10004; do
-        wget -O "/etc/keytabs/${user}.keytab" "http://${KDC_HOSTNAME}:8080/keytabs/${user}.keytab" || {
-            print_red "ERROR: Failed to download ${user}.keytab from KDC"
-            exit 1
-        }
-    done
-
-    # Set appropriate permissions for user keytabs
-    echo "Setting keytab permissions..."
-    for user in user10002 user10003 user10004; do
-        # Extract user ID (e.g., 10002 from user10002) and calculate group ID (e.g., 5002)
-        user_id=${user#user}
-        group_id=$((user_id - 5000))  # 10002 -> 5002, 10003 -> 5003, etc.
-        chown "${user_id}:${group_id}" "/etc/keytabs/${user}.keytab"
-        chmod 600 "/etc/keytabs/${user}.keytab"
-    done
-    print_green "✓ Kerberos configuration downloaded successfully"
-else
-    # we will use NRI to download the keytabs
-    print_yellow "Skipping user keytab download for non-local users setup"
-fi
-
-# Extract KDC and NFS server IPs from hostnames
-KDC_IP=$(echo "${KDC_HOSTNAME}" | sed 's/kdc-\([0-9.]*\)\.nip\.io/\1/')
-NFS_IP=$(echo "${NFS_HOSTNAME}" | sed 's/nfs-\([0-9.]*\)\.nip\.io/\1/')
-
-# Kubernetes specific ports - lets not mess with ufw for no reason
-if false; then
-    # Configure firewall for Kubernetes node
-    print_yellow "Configuring UFW firewall for Kubernetes node..."
-    ufw --force enable
-
-    ufw allow 6443/tcp       # Kubernetes API server
-    ufw allow 2379:2380/tcp  # etcd server client API
-    ufw allow 10250/tcp      # Kubelet API
-    ufw allow 10259/tcp      # kube-scheduler
-    ufw allow 10257/tcp      # kube-controller-manager
-    ufw allow 22/tcp         # SSH
-
-    # Container networking
-    ufw allow from 10.244.0.0/16    # Pod network (Flannel default)
-    ufw allow from 10.96.0.0/12     # Service network (K8s default)
-
-    # Allow access to specific servers
-    if [[ "${KDC_IP}" != "${KDC_HOSTNAME}" ]]; then
-        echo "Allowing outbound access to KDC server: ${KDC_IP}"
-        ufw allow out to "${KDC_IP}"
-    fi
-
-    if [[ "${NFS_IP}" != "${NFS_HOSTNAME}" ]]; then
-        echo "Allowing outbound access to NFS server: ${NFS_IP}"
-        ufw allow out to "${NFS_IP}"
-    fi
-
-    print_green "✓ Firewall configured for Kubernetes node"
-fi
+# Using NRI for dynamic user keytab management
+print_yellow "Using NRI for dynamic user keytab management"
 
 print_green "Kubernetes Node Prerequisites Setup Complete"
 

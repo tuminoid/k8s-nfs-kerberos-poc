@@ -13,6 +13,10 @@ print_red() { echo -e "${RED}$*${NC}"; }
 print_green() { echo -e "${GREEN}$*${NC}"; }
 print_yellow() { echo -e "${YELLOW}$*${NC}"; }
 
+# users and groups
+USERS=("user10002" "user10003" "user10004" "user10005" "user10006")
+GROUPS=("group5002" "group5003" "group5004" "group5005" "group5006"
+)
 print_yellow "Starting Kubernetes cluster cleanup..."
 
 # Reset Kubernetes cluster
@@ -62,13 +66,13 @@ sudo rm -f /tmp/kubeadm-config.yaml
 
 # clear local users created for testing
 print_yellow "Removing local test users..."
-for user in user10002 user10003 user10004; do
+for user in "${USERS[@]}"; do
     sudo deluser --remove-home "${user}" || true
 done
 
 # clear local groups created for testing
 print_yellow "Removing local test groups..."
-for group in group5002 group5003 group5004; do
+for group in "${GROUPS[@]}"; do
     sudo delgroup "${group}" || true
 done
 
@@ -76,7 +80,6 @@ done
 print_yellow "Cleaning up OCI hooks and state files..."
 sudo rm -rf /opt/nri-hooks/
 sudo rm -f /var/log/nri-kerberos.log
-sudo rm -f /etc/containers/oci/hooks.d/kerberos-*.json
 sudo rm -f /opt/nri/plugins/10-kerberos
 
 # Clean up Kerberos credential caches
