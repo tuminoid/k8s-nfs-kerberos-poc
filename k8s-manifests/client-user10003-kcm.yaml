@@ -3,6 +3,11 @@ kind: Pod
 metadata:
   name: client-user10003-kcm
   namespace: default
+  annotations:
+    nri.io/kerberos-auth: "enabled"
+    nri.io/kerberos-uid: "10003"
+    nri.io/kerberos-gid: "5003"
+    nri.io/kerberos-fsid: "5003"
 spec:
   securityContext:
     runAsUser: 10003

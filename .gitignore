@@ -1,9 +1,6 @@
 # Temporary kubeadm configuration files
 kubeadm-config*.yaml
 
-# Temporary test files
-debug-nfs.sh
-
 # System and editor files
 .DS_Store
 .vscode/
@@ -14,6 +11,3 @@ debug-nfs.sh
 # Log files
 *.log
 
-# Temporary directories
-tmp/
-temp/
