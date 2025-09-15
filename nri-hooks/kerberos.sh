@@ -11,7 +11,7 @@ FSID="${3:?}"
 USERNAME="${4:?}"
 REALM="${5:?}"
 KDC_HOSTNAME="${6:?}"
-NFS_HOSTNAME="${7:?}"
+NFS_HOSTNAME="${7:?}"  # Not used here, but could be for mount options
 
 log() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') $*" | tee -a /var/log/nri-kerberos.log
@@ -48,6 +48,7 @@ done
 # Set proper permissions on keytab
 log "Set keytab permissions"
 chmod 600 "${KEYTAB_FILE}"
+chown "${USER_ID}:${GROUP_ID}" "${KEYTAB_FILE}"
 
 # Perform kinit as root, then chown to correct UID/GID
 log "Performing kinit for ${USERNAME}"

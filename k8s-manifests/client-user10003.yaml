@@ -1,31 +1,31 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: client-user10002-kcm
+  name: client-user10003
   namespace: default
   annotations:
     nri.io/kerberos-auth: "enabled"
-    nri.io/kerberos-uid: "10002"
-    nri.io/kerberos-gid: "5002"
-    nri.io/kerberos-fsid: "5002"
+    nri.io/kerberos-uid: "10003"
+    nri.io/kerberos-gid: "5003"
+    nri.io/kerberos-fsid: "5003"
 spec:
   securityContext:
-    runAsUser: 10002
-    runAsGroup: 5002
-    fsGroup: 5002
+    runAsUser: 10003
+    runAsGroup: 5003
+    fsGroup: 5003
   containers:
   # Kerberos sidecar for credential management
   - name: krb5-sidecar
     image: krb5-sidecar:latest
     imagePullPolicy: Never
     securityContext:
-      runAsUser: 10002
-      runAsGroup: 5002
+      runAsUser: 10003
+      runAsGroup: 5003
     env:
     - name: KRB5CCNAME
       value: "KCM:"
     - name: KERBEROS_USER
-      value: "user10002"
+      value: "user10003"
     - name: KERBEROS_REALM
       valueFrom:
         configMapKeyRef:
@@ -61,13 +61,13 @@ spec:
     image: nfs-kerberos-client:latest
     imagePullPolicy: Never
     securityContext:
-      runAsUser: 10002
-      runAsGroup: 5002
+      runAsUser: 10003
+      runAsGroup: 5003
     env:
     - name: KRB5CCNAME
       value: "KCM:"
     - name: KERBEROS_USER
-      value: "user10002"
+      value: "user10003"
     - name: KERBEROS_REALM
       valueFrom:
         configMapKeyRef:
@@ -98,7 +98,7 @@ spec:
   volumes:
   - name: nfs-home
     persistentVolumeClaim:
-      claimName: nfs-user10002
+      claimName: nfs-user10003
   - name: keytabs
     hostPath:
       path: /etc/keytabs

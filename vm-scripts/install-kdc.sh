@@ -22,8 +22,14 @@ if [[ -z "${HOST_IP:-}" ]]; then
     exit 1
 fi
 
-# Parameters - if NFS IP is provided, use it; otherwise assume single-node setup
-NFS_SERVER_IP="${1:-$HOST_IP}"
+# Parameters - NFS server IP is required for multi-server setup
+if [[ -z "${1:-}" ]]; then
+    print_red "ERROR: NFS server IP is required"
+    echo "Usage: $0 <nfs_server_ip>"
+    exit 1
+fi
+
+NFS_SERVER_IP="$1"
 
 # Expand IPs to full nip.io hostnames
 KDC_HOSTNAME="kdc-${HOST_IP}.nip.io"
@@ -34,15 +40,12 @@ REALM="EXAMPLE.COM"
 ADMIN_PRINCIPAL="admin/admin"
 KDC_PASSWORD="changeme123"
 
-if [[ "${NFS_SERVER_IP}" != "${HOST_IP}" ]]; then
-    echo "=== Installing Kerberos KDC on Ubuntu 24.04 (Multi-Server) ==="
-    echo "KDC IP: ${HOST_IP} -> ${KDC_HOSTNAME}"
-    echo "NFS Server IP: ${NFS_SERVER_IP} -> ${NFS_HOSTNAME}"
-else
-    echo "=== Installing Kerberos KDC on Ubuntu 24.04 (Single-Node) ==="
-    echo "Host IP: ${HOST_IP}"
-    echo "KDC/NFS Hostname: ${KDC_HOSTNAME} / ${NFS_HOSTNAME}"
-fi
+# Users to provision
+USERS=("user10002" "user10003" "user10004" "user10005" "user10006")
+
+echo "=== Installing Kerberos KDC on Ubuntu 24.04 (Multi-Server) ==="
+echo "KDC IP: ${HOST_IP} -> ${KDC_HOSTNAME}"
+echo "NFS Server IP: ${NFS_SERVER_IP} -> ${NFS_HOSTNAME}"
 
 # Update system
 apt-get update && apt-get upgrade -y
@@ -133,7 +136,7 @@ kadmin.local -q "addprinc -randkey nfs/${NFS_SERVER_IP}@${REALM}"
 
 # Create user principals with specific passwords
 print_yellow "Creating user principals..."
-for user in user10002 user10003 user10004; do
+for user in "${USERS[@]}"; do
     echo "Creating user principal ${user}..."
     kadmin.local -q "addprinc -pw password ${user}@${REALM}"
 done
@@ -152,7 +155,7 @@ chmod 644 /etc/keytabs/nfs.keytab
 
 # Export user keytabs
 print_yellow "Creating user keytabs..."
-for user in user10002 user10003 user10004; do
+for user in "${USERS[@]}"; do
     echo "Creating user keytab for ${user}..."
     kadmin.local -q "ktadd -k /etc/keytabs/${user}.keytab ${user}@${REALM}"
     chmod 644 "/etc/keytabs/${user}.keytab"
@@ -173,34 +176,6 @@ fi
 
 # Extract NFS server IP from hostname (format: nfs-IP.nip.io)
 NFS_IP=$(echo "$NFS_HOSTNAME" | sed 's/nfs-\([0-9.]*\)\.nip\.io/\1/')
-
-# Configure firewall
-if false; then
-    print_yellow "=== Configuring UFW firewall ==="
-    ufw --force enable
-
-    # KDC specific ports
-    ufw allow 88/tcp    # Kerberos KDC
-    ufw allow 88/udp    # Kerberos KDC
-    ufw allow 749/tcp   # Kerberos admin
-    ufw allow 749/udp   # Kerberos admin
-    ufw allow 22/tcp    # SSH
-
-    # Allow access from NFS server specifically
-    if [[ "${NFS_IP}" != "${NFS_HOSTNAME}" ]]; then
-        echo "Allowing access from NFS server: ${NFS_IP}"
-        ufw allow from "${NFS_IP}"
-    else
-        print_red "WARNING: Could not extract IP from NFS hostname: ${NFS_HOSTNAME}"
-        echo "Falling back to allowing private networks"
-        ufw allow from 10.0.0.0/8      # Allow internal networks
-        ufw allow from 172.16.0.0/12   # Allow Docker networks
-        ufw allow from 192.168.0.0/16  # Allow private networks
-    fi
-
-    # Open port for keytab distribution
-    ufw allow 8080/tcp
-fi
 
 # Setup log rotation
 cat > /etc/logrotate.d/krb5 <<EOF
@@ -247,7 +222,7 @@ kadmin.local -q "ktadd -k /var/www/html/keytabs/nfs.keytab nfs/${NFS_HOSTNAME}@$
 kadmin.local -q "ktadd -k /var/www/html/keytabs/nfs.keytab nfs/${NFS_SERVER_IP}@${REALM}"
 
 # Regenerate user keytabs with current KVNO
-for user in user10002 user10003 user10004; do
+for user in "${USERS[@]}"; do
     kadmin.local -q "ktadd -k /var/www/html/keytabs/${user}.keytab ${user}@${REALM}"
 done
 

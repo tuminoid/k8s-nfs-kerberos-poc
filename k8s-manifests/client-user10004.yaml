@@ -1,0 +1,114 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: client-user10004
+  namespace: default
+  annotations:
+    nri.io/kerberos-auth: "enabled"
+    nri.io/kerberos-uid: "10004"
+    nri.io/kerberos-gid: "5004"
+    nri.io/kerberos-fsid: "5004"
+spec:
+  securityContext:
+    runAsUser: 10004
+    runAsGroup: 5004
+    fsGroup: 5004
+  containers:
+  # Kerberos sidecar for credential management
+  - name: krb5-sidecar
+    image: krb5-sidecar:latest
+    imagePullPolicy: Never
+    securityContext:
+      runAsUser: 10004
+      runAsGroup: 5004
+    env:
+    - name: KRB5CCNAME
+      value: "KCM:"
+    - name: KERBEROS_USER
+      value: "user10004"
+    - name: KERBEROS_REALM
+      valueFrom:
+        configMapKeyRef:
+          name: service-hostnames
+          key: KERBEROS_REALM
+    - name: KDC_HOSTNAME
+      valueFrom:
+        configMapKeyRef:
+          name: service-hostnames
+          key: KDC_HOSTNAME
+    - name: NFS_HOSTNAME
+      valueFrom:
+        configMapKeyRef:
+          name: service-hostnames
+          key: NFS_HOSTNAME
+    - name: KERBEROS_RENEWAL_TIME
+      value: "300"  # 5 min for testing
+    volumeMounts:
+    - name: keytabs
+      mountPath: /etc/keytabs
+      readOnly: true
+    - name: krb5-config
+      mountPath: /etc/krb5.conf
+      readOnly: true
+    - name: kcm-socket
+      mountPath: /var/run/.heim_org.h5l.kcm-socket
+    lifecycle:
+      preStop:
+        exec:
+          command: ["/usr/bin/kdestroy"]
+  # Main NFS client container
+  - name: nfs-client
+    image: nfs-kerberos-client:latest
+    imagePullPolicy: Never
+    #securityContext:
+    #  runAsUser: 10004
+    #  runAsGroup: 5004
+    env:
+    - name: KRB5CCNAME
+      value: "KCM:"
+    - name: KERBEROS_USER
+      value: "user10004"
+    - name: KERBEROS_REALM
+      valueFrom:
+        configMapKeyRef:
+          name: service-hostnames
+          key: KERBEROS_REALM
+    - name: KDC_HOSTNAME
+      valueFrom:
+        configMapKeyRef:
+          name: service-hostnames
+          key: KDC_HOSTNAME
+    - name: NFS_HOSTNAME
+      valueFrom:
+        configMapKeyRef:
+          name: service-hostnames
+          key: NFS_HOSTNAME
+    command: ["/usr/local/bin/entrypoint.sh"]
+    volumeMounts:
+    - name: nfs-home
+      mountPath: /home
+    - name: keytabs
+      mountPath: /etc/keytabs
+      readOnly: true
+    - name: krb5-config
+      mountPath: /etc/krb5.conf
+      readOnly: true
+    - name: kcm-socket
+      mountPath: /var/run/.heim_org.h5l.kcm-socket
+  volumes:
+  - name: nfs-home
+    persistentVolumeClaim:
+      claimName: nfs-user10004
+  - name: keytabs
+    hostPath:
+      path: /etc/keytabs
+      type: Directory
+  - name: krb5-config
+    hostPath:
+      path: /etc/krb5.conf
+      type: File
+  - name: kcm-socket
+    hostPath:
+      path: /var/run/.heim_org.h5l.kcm-socket
+      type: Socket
+  restartPolicy: Always

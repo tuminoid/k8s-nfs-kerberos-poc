@@ -13,8 +13,11 @@ print_red() { echo -e "${RED}$*${NC}"; }
 print_green() { echo -e "${GREEN}$*${NC}"; }
 print_yellow() { echo -e "${YELLOW}$*${NC}"; }
 
-USERS=("user10002" "user10003" "user10004")
-GROUPS=("group10002" "group10003" "group10004")
+USERS=("user10002" "user10003" "user10004" "user10005" "user10006")
+
+# Generate groups based on the UID pattern (UID - 5000 = GID)
+# group5002, group5003, group5004, group5005, group5006
+GROUPS=("group5002" "group5003" "group5004" "group5005" "group5006")
 
 print_yellow "Starting NFS and Kerberos cleanup..."
 

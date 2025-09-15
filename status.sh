@@ -14,22 +14,80 @@ print_red() { echo -e "${RED}$*${NC}"; }
 print_green() { echo -e "${GREEN}$*${NC}"; }
 print_yellow() { echo -e "${YELLOW}$*${NC}"; }
 
-# Configuration - detect from configmap or use defaults
+# Configuration - detect from configmap
 if kubectl get configmap service-hostnames &> /dev/null; then
     KDC_SERVER=$(kubectl get configmap service-hostnames -o jsonpath='{.data.KDC_HOSTNAME}' 2>/dev/null || echo "kdc.example.com")
     NFS_SERVER=$(kubectl get configmap service-hostnames -o jsonpath='{.data.NFS_HOSTNAME}' 2>/dev/null || echo "nfs.example.com")
 else
-    # Fallback to auto-detection for single-node setup
-    HOST_IP=$(ip addr show ens3 | grep 'inet ' | awk '{print $2}' | cut -d'/' -f1 2>/dev/null || echo "")
-    KDC_SERVER="kdc-${HOST_IP}.nip.io"
-    NFS_SERVER="nfs-${HOST_IP}.nip.io"
+    print_red "ERROR: service-hostnames ConfigMap not found"
+    echo "Make sure the deployment has been run and ConfigMap is created"
+    exit 1
 fi
+
+# Users to check
+USERS=("user10002" "user10003" "user10004" "user10005" "user10006")
 
 print_green "=== NFS Kerberos POC Status ==="
 echo
 
-# Check if cluster is accessible
-if kubectl cluster-info > /dev/null 2>&1; then
+# Helper functions for pod troubleshooting
+check_pod_errors() {
+    local describe_output="$1"
+    local pod="$2"
+
+    if echo "${describe_output}" | grep "mount.*failed\|nfs.*error\|permission.*denied" &>/dev/null; then
+        print_red "⚠ NFS mount issues detected"
+    fi
+    if echo "${describe_output}" | grep "image.*pull\|ErrImagePull" &>/dev/null; then
+        print_red "⚠ Image pull issues detected"
+    fi
+    if echo "${describe_output}" | grep "unbound.*PersistentVolumeClaim" &>/dev/null; then
+        print_red "⚠ PVC binding issues detected"
+    fi
+}
+
+show_pod_troubleshooting() {
+    print_yellow "Pod Details for Troubleshooting:"
+    for user in "${USERS[@]}"; do
+        local pod="client-${user}"
+
+        if ! kubectl get pod "${pod}" > /dev/null 2>&1; then
+            continue
+        fi
+
+        local pod_phase=$(kubectl get pod "${pod}" -o jsonpath='{.status.phase}' 2>/dev/null)
+        print_yellow "--- Pod: ${pod} (Status: ${pod_phase}) ---"
+
+        if [[ "${pod_phase}" != "Running" ]]; then
+            echo "Events and conditions:"
+            kubectl describe pod "${pod}" | grep -A 20 "Events:" || echo "No events found"
+
+            local describe_output=$(kubectl describe pod "${pod}" 2>/dev/null)
+            check_pod_errors "${describe_output}" "${pod}"
+        fi
+    done
+}
+
+test_nfs_access() {
+    if ! kubectl get pod client-user10002 > /dev/null 2>&1; then
+        return
+    fi
+
+    local pod_status=$(kubectl get pod client-user10002 -o jsonpath='{.status.phase}' 2>/dev/null)
+    print_yellow "Quick NFS Test:"
+    echo "Testing user10002 home directory access:"
+
+    if [[ "${pod_status}" = "Running" ]]; then
+        kubectl exec client-user10002 -- ls -la /home/ 2>/dev/null && \
+            print_green "✓ NFS mount accessible" || \
+            print_red "✗ Failed to access NFS"
+    else
+        echo "Pod not yet running (Status: ${pod_status})"
+        show_pod_troubleshooting
+    fi
+}
+
+check_kubernetes_resources() {
     print_green "✓ Kubernetes cluster accessible"
 
     # Check PVs
@@ -45,42 +103,12 @@ if kubectl cluster-info > /dev/null 2>&1; then
     kubectl get pods 2>/dev/null | grep client- || echo "No client pods found"
 
     # Quick test if any pods are running
-    if kubectl get pod client-user10002 > /dev/null 2>&1; then
-        POD_STATUS=$(kubectl get pod client-user10002 -o jsonpath='{.status.phase}' 2>/dev/null)
-        print_yellow "Quick NFS Test:"
-        echo "Testing user10002 home directory access:"
-        if [[ "${POD_STATUS}" = "Running" ]]; then
-            kubectl exec client-user10002 -- ls -la /home/ 2>/dev/null && print_green "✓ NFS mount accessible" || print_red "✗ Failed to access NFS"
-        else
-            echo "Pod not yet running (Status: ${POD_STATUS})"
+    test_nfs_access
+}
 
-            # Show detailed pod information for troubleshooting
-            print_yellow "Pod Details for Troubleshooting:"
-            for pod in client-user10002 client-user10003 client-user10004; do
-                if kubectl get pod "${pod}" > /dev/null 2>&1; then
-                    POD_PHASE=$(kubectl get pod "${pod}" -o jsonpath='{.status.phase}' 2>/dev/null)
-                    print_yellow "--- Pod: ${pod} (Status: ${POD_PHASE}) ---"
-
-                    if [[ "${POD_PHASE}" != "Running" ]]; then
-                        echo "Events and conditions:"
-                        kubectl describe pod "${pod}" | grep -A 20 "Events:" || echo "No events found"
-
-                        # Check for specific error patterns
-                        DESCRIBE_OUTPUT=$(kubectl describe pod "${pod}" 2>/dev/null)
-                        if echo "${DESCRIBE_OUTPUT}" | grep "mount.*failed\|nfs.*error\|permission.*denied" &>/dev/null; then
-                            print_red "⚠ NFS mount issues detected"
-                        fi
-                        if echo "${DESCRIBE_OUTPUT}" | grep "image.*pull\|ErrImagePull" &>/dev/null; then
-                            print_red "⚠ Image pull issues detected"
-                        fi
-                        if echo "${DESCRIBE_OUTPUT}" | grep "unbound.*PersistentVolumeClaim" &>/dev/null; then
-                            print_red "⚠ PVC binding issues detected"
-                        fi
-                    fi
-                fi
-            done
-        fi
-    fi
+# Check if cluster is accessible
+if kubectl cluster-info > /dev/null 2>&1; then
+    check_kubernetes_resources
 else
     print_red "✗ Kubernetes cluster not accessible"
 fi
@@ -126,7 +154,7 @@ if systemctl list-unit-files | grep &>/dev/null "kcm.service"; then
     fi
 else
     print_red "✗ KCM service not configured"
-    echo "  Fix: Run vm-scripts/setup-k8s-node.sh first"
+    echo "  Fix: Run vm-scripts/install-k8s.sh first"
     SETUP_COMPLETE=false
 fi
 
@@ -140,7 +168,7 @@ if systemctl list-unit-files | grep &>/dev/null "kerberos-system-creds.service";
     fi
 else
     print_red "✗ System credentials service not configured"
-    echo "  Fix: Run vm-scripts/setup-k8s-node.sh first"
+    echo "  Fix: Run vm-scripts/install-k8s.sh first"
     SETUP_COMPLETE=false
 fi
 
@@ -149,13 +177,13 @@ if [[ -f /etc/modules-load.d/nfs-kerberos.conf ]]; then
     print_green "✓ NFS Kerberos kernel modules configured for boot"
 else
     print_red "✗ Kernel modules not configured for persistent loading"
-    echo "  Fix: Run vm-scripts/setup-k8s-node.sh first"
+    echo "  Fix: Run vm-scripts/install-k8s.sh first"
     SETUP_COMPLETE=false
 fi
 
 if [[ "${SETUP_COMPLETE}" == "false" ]]; then
     echo
-    print_red "⚠ SETUP INCOMPLETE: Run vm-scripts/setup-k8s-node.sh before deploy-k8s.sh"
+    print_red "⚠ SETUP INCOMPLETE: Run vm-scripts/install-k8s.sh before deploy-k8s.sh"
     echo
 fi
 
@@ -177,14 +205,6 @@ if systemctl is-active --quiet rpc-gssd; then
 else
     print_red "✗ rpc-gssd service not running (CRITICAL)"
     echo "  Fix: sudo systemctl start rpc-gssd"
-fi
-
-# Check nfs-idmapd (needed for user mapping)
-if systemctl is-active --quiet nfs-idmapd; then
-    print_green "✓ nfs-idmapd service running"
-else
-    print_red "✗ nfs-idmapd service not running"
-    echo "  Fix: sudo systemctl start nfs-idmapd"
 fi
 
 # Check KCM daemon (for credential sharing)
@@ -237,10 +257,10 @@ fi
 
 echo
 
-echo "Logs from krb5-sidecar:"
-kubectl logs client-user10002-kcm -c krb5-sidecar
+echo "Logs from user10002 krb5-sidecar:"
+kubectl logs client-user10002 -c krb5-sidecar
 echo
 
-echo "Logs from nfs-client:"
-kubectl logs client-user10002-kcm -c nfs-client
+echo "Logs from user10002 nfs-client:"
+kubectl logs client-user10002 -c nfs-client
 echo

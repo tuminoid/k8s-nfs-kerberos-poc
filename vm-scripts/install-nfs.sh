@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Run this on a dedicated VM for the NFS server
-# Usage: ./install-nfs.sh <kdc_hostname> [k8s_hostname]
+# Usage: ./install-nfs.sh <kdc_hostname> <k8s_hostname>
 
 set -euo pipefail
 
@@ -27,9 +27,15 @@ if [[ -z "${HOST_IP:-}" ]]; then
     exit 1
 fi
 
-# Parameters - if KDC IP is provided, use it; otherwise assume single-node setup
-KDC_SERVER_IP="${1:-$HOST_IP}"
-K8S_SERVER_IP="${2:-$HOST_IP}"
+# Parameters - KDC and K8S IPs are required for multi-server setup
+if [[ -z "${1:-}" ]] || [[ -z "${2:-}" ]]; then
+    print_red "ERROR: KDC and K8S server IPs are required"
+    echo "Usage: $0 <kdc_server_ip> <k8s_server_ip>"
+    exit 1
+fi
+
+KDC_SERVER_IP="$1"
+K8S_SERVER_IP="$2"
 
 # Expand IPs to full nip.io hostnames
 KDC_HOSTNAME="kdc-${KDC_SERVER_IP}.nip.io"
@@ -40,18 +46,13 @@ K8S_HOSTNAME="k8s-${K8S_SERVER_IP}.nip.io"
 REALM="EXAMPLE.COM"
 DOMAIN="example.com"
 
-if [[ "${KDC_SERVER_IP}" != "${HOST_IP}" ]]; then
-    echo "=== Installing NFS Server with Kerberos on Ubuntu 24.04 (Multi-Server) ==="
-    echo "NFS IP: ${HOST_IP} -> ${NFS_HOSTNAME}"
-    echo "KDC Server IP: ${KDC_SERVER_IP} -> ${KDC_HOSTNAME}"
-    if [[ "${K8S_SERVER_IP}" != "${HOST_IP}" ]]; then
-        echo "K8S Server IP: ${K8S_SERVER_IP} -> ${K8S_HOSTNAME}"
-    fi
-else
-    echo "=== Installing NFS Server with Kerberos on Ubuntu 24.04 (Single-Node) ==="
-    echo "Host IP: ${HOST_IP}"
-    echo "NFS/KDC Hostname: ${NFS_HOSTNAME} / ${KDC_HOSTNAME}"
-fi
+# Users to provision
+USERS=("user10002" "user10003" "user10004" "user10005" "user10006")
+
+echo "=== Installing NFS Server with Kerberos on Ubuntu 24.04 (Multi-Server) ==="
+echo "NFS IP: ${HOST_IP} -> ${NFS_HOSTNAME}"
+echo "KDC Server IP: ${KDC_SERVER_IP} -> ${KDC_HOSTNAME}"
+echo "K8S Server IP: ${K8S_SERVER_IP} -> ${K8S_HOSTNAME}"
 
 # Update system
 apt-get update && apt-get upgrade -y
@@ -73,9 +74,9 @@ mkdir -p /exports/shared
 
 # Create user directories with proper ownership
 echo "Creating user directories..."
-for uid in 10002 10003 10004; do
-    gid=$((uid - 5000))  # 5002, 5003, 5004
-    user="user${uid}"
+for user in "${USERS[@]}"; do
+    uid=${user#user}  # Extract UID from username (e.g., user10002 -> 10002)
+    gid=$((uid - 5000))  # 5002, 5003, 5004, 5005, 5006
 
     # Create group if it doesn't exist
     groupadd -g "${gid}" group"${gid}" || true
@@ -104,17 +105,15 @@ cat > /etc/exports <<EOF
 
 # Shared directory - accessible by all authenticated users
 /exports/shared *(rw,sync,no_subtree_check,no_root_squash,sec=sys:krb5:krb5i:krb5p)
-
-# User home directories - each user can only access their own
-# /exports/home/user10002 *(rw,sync,no_subtree_check,no_root_squash,sec=krb5:krb5i:krb5p)
-# /exports/home/user10003 *(rw,sync,no_subtree_check,no_root_squash,sec=krb5:krb5i:krb5p)
-# /exports/home/user10004 *(rw,sync,no_subtree_check,no_root_squash,sec=krb5:krb5i:krb5p)
-
-# with sec=sys
-/exports/home/user10002 *(rw,sync,no_subtree_check,no_root_squash,sec=sys:krb5:krb5i:krb5p)
-/exports/home/user10003 *(rw,sync,no_subtree_check,no_root_squash,sec=sys:krb5:krb5i:krb5p)
-/exports/home/user10004 *(rw,sync,no_subtree_check,no_root_squash,sec=sys:krb5:krb5i:krb5p)
 EOF
+
+# Add user home directory exports dynamically
+for user in "${USERS[@]}"; do
+    cat >> /etc/exports <<EOF
+# User home directory for ${user}
+/exports/home/${user} *(rw,sync,no_subtree_check,no_root_squash,sec=sys:krb5:krb5i:krb5p)
+EOF
+done
 
 # Configure NFSv4 domain
 cat > /etc/idmapd.conf <<EOF
@@ -169,54 +168,6 @@ print_green "✓ Kerberos configuration downloaded successfully"
 
 # Extract KDC server IP from hostname (format: kdc-IP.nip.io)
 KDC_IP=$(echo "${KDC_HOSTNAME}" | sed 's/kdc-\([0-9.]*\)\.nip\.io/\1/')
-
-# Configure firewall
-if false; then
-    print_yellow "=== Configuring UFW firewall ==="
-    ufw --force enable
-
-    # NFS specific ports
-    ufw allow 2049/tcp   # NFS
-    ufw allow 2049/udp   # NFS
-    ufw allow 111/tcp    # RPC portmapper
-    ufw allow 111/udp    # RPC portmapper
-    ufw allow 20048/tcp  # mountd
-    ufw allow 20048/udp  # mountd
-    ufw allow 22/tcp     # SSH
-
-    # Allow access from KDC server specifically (for keytab downloads)
-    if [[ "${KDC_IP}" != "${KDC_HOSTNAME}" ]]; then
-        echo "Allowing access from KDC server: ${KDC_IP}"
-        ufw allow from "${KDC_IP}"
-    else
-        echo "WARNING: Could not extract IP from KDC hostname: ${KDC_HOSTNAME}"
-    fi
-
-    # Allow access from Kubernetes node if specified
-    if [[ -n "${K8S_HOSTNAME}" ]]; then
-        K8S_IP=$(echo "${K8S_HOSTNAME}" | sed 's/k8s-\([0-9.]*\)\.nip\.io/\1/')
-        if [[ "${K8S_IP}" != "${K8S_HOSTNAME}" ]]; then
-            echo "Allowing NFS access from K8s node: ${K8S_IP}"
-            ufw allow from "${K8S_IP}" to any port 2049     # NFS
-            ufw allow from "${K8S_IP}" to any port 111      # RPC portmapper
-            ufw allow from "${K8S_IP}" to any port 20048    # mountd
-        else
-            echo "WARNING: Could not extract IP from K8s hostname: ${K8S_HOSTNAME}"
-        fi
-    fi
-
-    # Fallback: Allow access from common private network ranges for any other K8s nodes
-    echo "Allowing NFS access from common private network ranges"
-    ufw allow from 10.0.0.0/8 to any port 2049       # NFS
-    ufw allow from 10.0.0.0/8 to any port 111        # RPC portmapper
-    ufw allow from 10.0.0.0/8 to any port 20048      # mountd
-    ufw allow from 172.16.0.0/12 to any port 2049    # Docker/K8s networks - NFS
-    ufw allow from 172.16.0.0/12 to any port 111     # Docker/K8s networks - RPC
-    ufw allow from 172.16.0.0/12 to any port 20048   # Docker/K8s networks - mountd
-    ufw allow from 192.168.0.0/16 to any port 2049   # Private networks - NFS
-    ufw allow from 192.168.0.0/16 to any port 111    # Private networks - RPC
-    ufw allow from 192.168.0.0/16 to any port 20048  # Private networks - mountd
-fi
 
 # Start and enable NFS services
 print_yellow "=== Starting NFS services ==="

@@ -23,9 +23,15 @@ if [[ -z "${HOST_IP}" ]]; then
     exit 1
 fi
 
-# Parameters - if KDC/NFS IPs are provided, use them; otherwise assume single-node setup
-KDC_SERVER_IP="${1:-${HOST_IP}}"
-NFS_SERVER_IP="${2:-${HOST_IP}}"
+# Parameters - KDC and NFS IPs are required for multi-server deployment
+if [[ -z "${1:-}" ]] || [[ -z "${2:-}" ]]; then
+    print_red "ERROR: KDC and NFS server IPs are required"
+    echo "Usage: $0 <kdc_server_ip> <nfs_server_ip> [k8s_version]"
+    exit 1
+fi
+
+KDC_SERVER_IP="$1"
+NFS_SERVER_IP="$2"
 K8S_VERSION="${3:-1.32}"
 
 # Expand IPs to full nip.io hostnames
@@ -34,21 +40,13 @@ NFS_HOSTNAME="nfs-${NFS_SERVER_IP}.nip.io"
 K8S_HOSTNAME="k8s-${HOST_IP}.nip.io"
 REALM="EXAMPLE.COM"
 
-if [[ "${KDC_SERVER_IP}" != "${HOST_IP}" ]] || [[ "${NFS_SERVER_IP}" != "${HOST_IP}" ]]; then
-    print_yellow "=== Multi-Server Deployment ==="
-    print_yellow "K8S: ${HOST_IP} -> ${K8S_HOSTNAME}"
-    print_yellow "KDC: ${KDC_SERVER_IP} -> ${KDC_HOSTNAME}"
-    print_yellow "NFS: ${NFS_SERVER_IP} -> ${NFS_HOSTNAME}"
-else
-    print_yellow "=== Single-Node Deployment ==="
-    print_yellow "Host: ${HOST_IP} -> ${KDC_HOSTNAME} / ${NFS_HOSTNAME}"
-fi
+print_yellow "=== Multi-Server Deployment ==="
+print_yellow "K8S: ${HOST_IP} -> ${K8S_HOSTNAME}"
+print_yellow "KDC: ${KDC_SERVER_IP} -> ${KDC_HOSTNAME}"
+print_yellow "NFS: ${NFS_SERVER_IP} -> ${NFS_HOSTNAME}"
 
-# we can provision up to 3 users
-USERS=("user10002" "user10003" "user10004")
-# or we use NRI to inject users on need
-LOCAL_USERS="${LOCAL_USERS:-false}"
-echo "Using Local Users: ${LOCAL_USERS}"
+# we will provision up to 5 users with different setups
+USERS=("user10002" "user10003" "user10004" "user10005" "user10006")
 
 # Script directory for relative paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -56,7 +54,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Check if Kubernetes tools are installed
 if ! command -v kubectl &> /dev/null || ! command -v kubeadm &> /dev/null; then
     print_red "ERROR: Kubernetes prerequisites not installed!"
-    print_yellow "Please run ./vm-scripts/setup-k8s-node.sh first"
+    print_yellow "Please run ./vm-scripts/install-k8s.sh first"
     exit 1
 fi
 print_green "✓ Kubernetes prerequisites detected"
@@ -140,7 +138,7 @@ EOF
         sudo cp -i /etc/kubernetes/admin.conf "${HOME}"/.kube/config
         sudo chown "$(id -u):$(id -g)" "${HOME}"/.kube/config
 
-        # Allow scheduling on control plane (single node setup)
+        # Allow scheduling on control plane
         kubectl taint nodes --all node-role.kubernetes.io/control-plane-
 
         # Install Calico CNI network plugin
@@ -181,86 +179,46 @@ print_green "✓ ConfigMap with service hostnames created"
 # Ensure keytabs are fresh and synchronized
 print_yellow "Refreshing keytabs to ensure synchronization..."
 
-if [[ "${KDC_HOSTNAME}" = "kdc-${HOST_IP}.nip.io" ]]; then
-    # Single-node setup: run commands locally
-    sudo kadmin.local -q "ktadd -k /etc/keytabs/nfs.keytab nfs/${NFS_HOSTNAME}@${REALM} nfs/${NFS_SERVER_IP}@${REALM}"
-    sudo cp /etc/keytabs/nfs.keytab /var/www/html/keytabs/nfs.keytab
-    sudo cp /etc/keytabs/nfs.keytab /etc/krb5.keytab
-    sudo chmod 600 /etc/krb5.keytab
-else
-    # Multi-node setup: download fresh keytab from KDC
-    wget -O /tmp/fresh-nfs.keytab "http://${KDC_HOSTNAME}:8080/keytabs/nfs.keytab" || {
-        print_red "ERROR: Failed to download fresh NFS keytab from KDC"
-        print_yellow "Make sure the KDC is running and accessible at ${KDC_HOSTNAME}:8080"
-        exit 1
-    }
+# Multi-node setup: download fresh keytab from KDC
+wget -O /tmp/fresh-nfs.keytab "http://${KDC_HOSTNAME}:8080/keytabs/nfs.keytab" || {
+    print_red "ERROR: Failed to download fresh NFS keytab from KDC"
+    print_yellow "Make sure the KDC is running and accessible at ${KDC_HOSTNAME}:8080"
+    exit 1
+}
 
-    # Verify the keytab contains the right principal
-    if ! klist -k /tmp/fresh-nfs.keytab | grep -q "nfs/${NFS_HOSTNAME}@${REALM}"; then
-        print_red "ERROR: Downloaded keytab does not contain nfs/${NFS_HOSTNAME}@${REALM}"
-        print_yellow "Available principals in keytab:"
-        klist -k /tmp/fresh-nfs.keytab
-        exit 1
-    fi
-
-    sudo cp /tmp/fresh-nfs.keytab /etc/krb5.keytab
-    sudo chmod 600 /etc/krb5.keytab
-    rm -f /tmp/fresh-nfs.keytab
+# Verify the keytab contains the right principal
+if ! klist -k /tmp/fresh-nfs.keytab | grep -q "nfs/${NFS_HOSTNAME}@${REALM}"; then
+    print_red "ERROR: Downloaded keytab does not contain nfs/${NFS_HOSTNAME}@${REALM}"
+    print_yellow "Available principals in keytab:"
+    klist -k /tmp/fresh-nfs.keytab
+    exit 1
 fi
+
+sudo cp /tmp/fresh-nfs.keytab /etc/krb5.keytab
+sudo chmod 600 /etc/krb5.keytab
+rm -f /tmp/fresh-nfs.keytab
 
 print_green "✓ Fresh keytab installed"
 
-# Authenticate host with NFS service principal for mounting (only needed in single-node setup)
-if [[ "${KDC_HOSTNAME}" = "kdc-${HOST_IP}.nip.io" ]]; then
-    # Single-node setup: host needs NFS service principal for local testing
-    sudo kinit -kt /etc/krb5.keytab "nfs/${NFS_HOSTNAME}@${REALM}"
-    print_green "✓ Host authenticated with NFS service principal"
-fi
+# Set up OCI hooks for automatic Kerberos credential creation
+print_yellow "Setting up NRI hooks for automatic Kerberos authentication..."
+sudo mkdir -p /opt/nri-hooks /opt/nri/plugins
 
-# Initialize user credentials (get initial tickets)
-# Create credential caches without local users - works for both LOCAL_USERS modes
-if [[ "${LOCAL_USERS}" = true ]]; then
-    print_yellow "Creating credential caches for container users..."
-    for user in "${USERS[@]}"; do
-        user_id="${user#user}"
-        group_id="$((user_id - 5000))"
+print_yellow "Building NRI kerberos plugin..."
+cd "${SCRIPT_DIR}"/nri-plugin
+go build ./kerberos.go
 
-        print_yellow "Creating credential cache for ${user}..."
+# Install the hook-injector plugin
+sudo cp ./kerberos /opt/nri/plugins/10-kerberos
+sudo chmod +x /opt/nri/plugins/10-kerberos
+cd ..
 
-        # Create credential cache as root using keytab
-        sudo KRB5CCNAME="FILE:/tmp/krb5cc_${user_id}" kinit -k -t "/etc/keytabs/${user}.keytab" "${user}@${REALM}"
+sudo cp "${SCRIPT_DIR}/nri-hooks/kerberos.sh" /opt/nri-hooks/
+sudo chmod +x /opt/nri-hooks/*.sh
 
-        # Change ownership to the correct UID/GID (works whether users exist or not)
-        sudo chown "${user_id}:${group_id}" "/tmp/krb5cc_${user_id}"
-
-        print_yellow "Created credential cache /tmp/krb5cc_${user_id} with ownership ${user_id}:${group_id}"
-    done
-    print_green "✓ User credential caches configured"
-
-else
-    # Set up OCI hooks for automatic Kerberos credential creation
-    print_yellow "Setting up NRI hooks for automatic Kerberos authentication..."
-    sudo mkdir -p /opt/nri-hooks /opt/nri/conf.d /opt/nri/plugins
-
-    print_yellow "Building NRI kerberos plugin..."
-    cd "${SCRIPT_DIR}"/nri-plugin
-    go build ./kerberos.go
-
-    # Install the hook-injector plugin
-    sudo cp ./kerberos /opt/nri/plugins/10-kerberos
-    sudo chmod +x /opt/nri/plugins/10-kerberos
-    cd ..
-
-    # Copy hook scripts to host
-    sudo cp "${SCRIPT_DIR}"/nri-hooks/kerberos*.json /etc/containers/oci/hooks.d/
-    # not sure we need this?
-    sudo cp "${SCRIPT_DIR}/nri-hooks/kerberos.sh" /opt/nri-hooks/
-    sudo chmod +x /opt/nri-hooks/*.sh
-
-    # Create configuration file
-    sudo systemctl restart containerd
-    print_green "✓ NRI hooks configured and containerd restarted"
-fi
+# Create configuration file
+sudo systemctl restart containerd
+print_green "✓ NRI hooks configured and containerd restarted"
 
 # Initialize system credentials for immediate use (service should be set up by setup script)
 print_yellow "Initializing system credentials for NFS operations..."
@@ -277,7 +235,7 @@ print_green "✓ System credentials initialized"
 print_yellow "Restarting critical daemons to ensure fresh state..."
 
 # Restart daemons to ensure they're running with fresh configuration
-# (These should already be enabled by setup-k8s-node.sh)
+# (These should already be enabled by install-k8s.sh)
 sudo systemctl restart rpcbind rpc-gssd kcm || true
 sudo systemctl start rpc-gssd || true
 
@@ -312,15 +270,28 @@ EOF
 done
 print_green "✓ Persistent volumes deployed"
 
-# Deploy PVCs
+# Deploy PVCs dynamically
 for user in "${USERS[@]}"; do
-    kubectl apply -f "k8s-manifests/pvc-${user}.yaml"
+    cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nfs-${user}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  storageClassName: nfs-krb5
+  volumeName: nfs-pv-${user}
+EOF
 done
 print_green "✓ Persistent volume claims deployed"
 
 # Deploy client pods with KCM sidecar (they now use configmap for hostnames)
 for user in "${USERS[@]}"; do
-    kubectl apply -f "k8s-manifests/client-${user}-kcm.yaml"
+    kubectl apply -f "k8s-manifests/client-${user}.yaml"
 done
 print_green "✓ KCM-based NFS client pods deployed"
 
