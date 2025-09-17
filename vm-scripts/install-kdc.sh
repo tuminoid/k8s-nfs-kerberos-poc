@@ -68,8 +68,8 @@ cat > /etc/krb5.conf <<EOF
     proxiable = true
     dns_lookup_realm = false
     dns_lookup_kdc = false
-    ticket_lifetime = 24h
-    renew_lifetime = 7d
+    ticket_lifetime = 10m
+    renew_lifetime = 30m
     rdns = false
 
 [realms]
@@ -81,8 +81,8 @@ cat > /etc/krb5.conf <<EOF
         acl_file = /etc/krb5kdc/kadm5.acl
         key_stash_file = /etc/krb5kdc/stash
         kdc_ports = 750,88
-        max_life = 10h 0m 0s
-        max_renewable_life = 7d 0h 0m 0s
+        max_life = 20m 0s
+        max_renewable_life = 40m 0s
         master_key_type = des3-hmac-sha1
         supported_enctypes = aes256-cts:normal aes128-cts:normal des3-hmac-sha1:normal arcfour-hmac:normal
     }
@@ -120,10 +120,8 @@ print_yellow "Creating KDC database..."
 printf '%s\n%s\n' "${KDC_PASSWORD}" "${KDC_PASSWORD}" | kdb5_util create -s
 
 # Start KDC services
-systemctl enable krb5-kdc
-systemctl enable krb5-admin-server
-systemctl start krb5-kdc
-systemctl start krb5-admin-server
+systemctl enable --now krb5-kdc
+systemctl enable --now krb5-admin-server
 
 # Create admin principal
 print_yellow "Creating admin principal..."

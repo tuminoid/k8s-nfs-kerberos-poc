@@ -1,8 +1,12 @@
 # NFSv4 + Kerberos in Kubernetes
 
-Kubeadm cluster with NFSv4 + Kerberos authentication using KCM sidecar pattern.
+Kubeadm cluster with NFSv4 + Kerberos authentication.
 
 ## Setup
+
+Setup requires three Ubuntu 24.04 VMs with root access, 4GB RAM, 50GB disk each.
+Single node setup is not supported to avoid taking shortcuts that would not work
+in real world.
 
 ```bash
 # On KDC machine (192.168.1.10):
@@ -19,19 +23,17 @@ make deploy KDC=kdc-192.168.1.10.nip.io NFS=nfs-192.168.1.11.nip.io
 
 # Test everything:
 make test
+
+# Test specific scenarios:
+make test-persistent    # Test data persistence across pod restarts
+make test-renewal      # Test Kerberos renewal lifecycle (~2 hours)
 ```
-
-## Requirements
-
-- Ubuntu 24.04 VMs with ens3 interface
-- Root access, 4GB RAM, 50GB disk per machine
-- Network connectivity between machines
 
 ## Architecture
 
 **Components:**
-- **KDC machine**: Kerberos KDC server (port 88, 8080)
-- **NFS machine**: NFS server with Kerberos (port 2049, sec=krb5)
+- **KDC machine**: Kerberos KDC server
+- **NFS machine**: NFS server with Kerberos
 - **K8s machine**: Kubernetes node with client pods
 
 **Using nip.io for hostnames:**
@@ -46,34 +48,34 @@ make test
 
 ## What Gets Deployed
 
-**Host level:**
-- KDC server: `kdc.example.com` (port 88, 8080)
-- NFS server: `nfs.example.com` (port 2049, sec=krb5)
-- Host keytab: `/etc/krb5.keytab` with NFS service principals
-- KCM daemon: Credential sharing via Unix socket
-- GSS modules + RPC pipefs
-
-**Per-user (3 users: 10002, 10003, 10004):**
+**Per-user (5 users: user id's from 10002 to 10006):**
 - User principals + keytabs from HTTP
 - NFS exports with proper UIDs
-- PV/PVC + Pod (krb5-sidecar + nfs-client)
+- PV/PVC + Pod
+- See `nri.io/kerberos-scenario` annotation for pod scenario
 
 **Sidecar:**
-- User `kinit` + NFS service tickets
-- Credential renewal + KCM integration
+- Credential renewal with FILE-based credential caches
 
 ## Architecture
 
 Host authenticates NFS mount. Containers authenticate file access.
 Auth needs to be in place on the node side when Kubelet mounts the NFS,
-otherwise it is stale mount.
+otherwise it is stale mount. This is dynamically handled by custom NRI plugin,
+that gets keytab from pod annotation, creates user, gets ticket and preps
+everything for container runtime to be able to do successful mount.
 
 ## Iteration
 
 ```bash
-make status   # Check what's running
-make clean    # Clean K8s only (keeps NFS + KDC)
+make status                                      # Check what's running
+make clean                                       # Clean kubeadm K8s cluster, and tickets etc
 make deploy KDC=<kdc_hostname> NFS=<nfs_hostname>  # Deploy cluster
+
+# Testing options:
+make test                # Full test suite (5 minutes)
+make test-persistent     # Test data persistence across pod restarts
+make test-renewal        # Test Kerberos renewal lifecycle (~2 hours)
 ```
 
 ## Files
@@ -88,24 +90,15 @@ make deploy KDC=<kdc_hostname> NFS=<nfs_hostname>  # Deploy cluster
 
 **Manifests:**
 - `k8s-manifests/client-user*.yaml` - Pod manifests using configmaps
-- `k8s-manifests/pvc-user*.yaml` - PVC manifests
 - `k8s-manifests/storageclass.yaml` - Storage class
-- PVs are generated dynamically with correct NFS hostname
+- PVs and PVCs are generated dynamically with correct NFS hostname
 
-**Key Features:**
-- Uses nip.io hostnames instead of /etc/hosts
-- ConfigMaps for dynamic hostname configuration
-- PVs generated dynamically in deploy script
-- Role-based installation with unified command interface
-- **NRI Integration**: Dynamic user creation via NRI hooks
-- No modification of committed git manifests
+## NRI Mode (Dynamic User Ticket Management)
 
-## NRI Mode (Dynamic User Creation)
-
-The system uses NRI (Node Runtime Interface) hooks to:
-- Dynamically create users when pods are scheduled
-- Download keytabs and perform Kerberos authentication before NFS mount
-- Clean up users and credentials when pods are deleted
+The system uses NRI (Node Resource Interface) plugin to:
+- Download keytabs and perform Kerberos authentication before NFS mount happens
+- Secure keytabs and credentials to the pod user id
+- Clean up users and credentials when pods are deleted (TBD)
 
 ## File Structure
 
@@ -115,6 +108,7 @@ The system uses NRI (Node Runtime Interface) hooks to:
 - `nri-plugin`: custom Kerberos auth'ing NRI plugin
 - `nri-hooks/`: NRI hook scripts for user management
 - `deploy-k8s.sh`: Full cluster deployment
+- `status.sh`: K8s node status check
 - `test.sh`: Validation suite
 
 ## Troubleshooting
@@ -123,14 +117,14 @@ The system uses NRI (Node Runtime Interface) hooks to:
 make status                                         # Overall health
 kubectl logs client-user10002 -c krb5-sidecar       # Sidecar logs
 kubectl logs client-user10002 -c nfs-client         # Client logs
-sudo systemctl status kcm                           # KCM daemon
+sudo systemctl status rpc-gssd                      # GSS daemon
 sudo exportfs -v                                    # NFS exports
 sudo -u user10002 klist -e                          # User tickets
 ```
 
 ## Common Issues
 
-- KCM socket missing: `ls -la /var/run/kcm.socket`
+- FILE credential caches missing: `ls -la /tmp/krb5cc_*`
 - GSS modules not loaded: `lsmod | grep gss`
 - RPC pipefs not mounted: `mount | grep rpc_pipefs`
 - Host keytab missing NFS principals: `klist -k /etc/krb5.keytab`

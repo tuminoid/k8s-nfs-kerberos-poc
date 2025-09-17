@@ -3,7 +3,7 @@
 # This Makefile provides convenient targets for setting up, deploying,
 # testing, and managing the NFS Kerberos POC environment across multiple machines.
 
-.PHONY: all help install deploy test clean realclean status
+.PHONY: all help install deploy test test-persistent test-renewal clean realclean status replace
 
 all: help
 
@@ -64,7 +64,10 @@ help:
 	@echo "  deploy     - Deploy Kubernetes cluster and NFS applications"
 	@echo "               Usage: make deploy KDC=<kdc_ip> NFS=<nfs_ip>"
 	@echo "  test       - Run comprehensive test suite to validate deployment"
+	@echo "  test-persistent - Run persistent storage tests only"
+	@echo "  test-renewal   - Run Kerberos renewal lifecycle test (~2 hours)"
 	@echo "  status     - Show current status of all services and pods"
+	@echo "  replace    - Force replace all client pods and clean credential caches"
 	@echo "  clean      - Clean up Kubernetes resources only"
 	@echo "  realclean  - Clean up everything (Kubernetes + NFS + Kerberos)"
 	@echo ""
@@ -89,7 +92,9 @@ deploy:
 		./deploy-k8s.sh "$(KDC)" "$(NFS)"; \
 	fi
 	@echo "✓ Deployment complete!"
-	@echo "Next: run 'make test' to validate the deployment"
+	@echo ""
+	@echo "Next: run 'make status' to validate the deployment and 'make test' to quick test pods"
+	@echo ""
 
 # Run comprehensive test suite
 test:
@@ -102,10 +107,46 @@ test:
 	@echo ""
 	@echo "Test suite completed. Check results above."
 
+# Run persistent storage tests only
+test-persistent:
+	@echo "=== Running Persistent Storage Tests ==="
+	@if ! kubectl get pods >/dev/null 2>&1; then \
+		echo "ERROR: Kubernetes cluster not accessible. Run 'make deploy' first."; \
+		exit 1; \
+	fi
+	./test.sh persistent
+	@echo ""
+	@echo "Persistent storage test completed. Check results above."
+
+# Run Kerberos renewal lifecycle test (~2 hours)
+test-renewal:
+	@echo "=== Running Kerberos Renewal Lifecycle Test ==="
+	@echo "This test takes approximately 2 hours to complete"
+	@if ! kubectl get pods >/dev/null 2>&1; then \
+		echo "ERROR: Kubernetes cluster not accessible. Run 'make deploy' first."; \
+		exit 1; \
+	fi
+	./test.sh renewal
+	@echo ""
+	@echo "Renewal lifecycle test completed. Check results above."
+
 # Show current status of services and applications
 status:
 	@echo "=== NFS Kerberos POC Status ==="
 	./status.sh
+
+# Force replace all client pods
+replace:
+	@echo "=== Force Replacing All Client Pods ==="
+	@if ! command -v kubectl >/dev/null 2>&1; then \
+		echo "ERROR: kubectl not found. Ensure Kubernetes cluster is accessible."; \
+		exit 1; \
+	fi
+	@echo "Cleaning up credential caches..."
+	sudo rm -f /tmp/krb5cc_10002 /tmp/krb5cc_10003 /tmp/krb5cc_10004 /tmp/krb5cc_10005 /tmp/krb5cc_10006
+	@echo "Replacing client manifests..."
+	kubectl replace --force -f k8s-manifests/client-user10002.yaml -f k8s-manifests/client-user10003.yaml -f k8s-manifests/client-user10004.yaml -f k8s-manifests/client-user10005.yaml -f k8s-manifests/client-user10006.yaml
+	@echo "✓ All client pods replaced successfully!"
 
 # Clean up Kubernetes resources only
 clean:

@@ -15,8 +15,7 @@ print_yellow() { echo -e "${YELLOW}$*${NC}"; }
 
 # users and groups
 USERS=("user10002" "user10003" "user10004" "user10005" "user10006")
-GROUPS=("group5002" "group5003" "group5004" "group5005" "group5006"
-)
+GROUPS=("group5002" "group5003" "group5004" "group5005" "group5006")
 print_yellow "Starting Kubernetes cluster cleanup..."
 
 # Reset Kubernetes cluster
@@ -67,13 +66,13 @@ sudo rm -f /tmp/kubeadm-config.yaml
 # clear local users created for testing
 print_yellow "Removing local test users..."
 for user in "${USERS[@]}"; do
-    sudo deluser --remove-home "${user}" || true
+    sudo useradel -r -f "${user}" || true
 done
 
 # clear local groups created for testing
 print_yellow "Removing local test groups..."
 for group in "${GROUPS[@]}"; do
-    sudo delgroup "${group}" || true
+    sudo groupdel "${group}" || true
 done
 
 # Clean up OCI hooks and related files
@@ -84,8 +83,11 @@ sudo rm -f /opt/nri/plugins/10-kerberos
 
 # Clean up Kerberos credential caches
 print_yellow "Cleaning up Kerberos credential caches..."
-sudo rm -f /tmp/krb5cc_*
-print_yellow "Note: This removes ALL credential caches including system ones - they will be recreated on next deploy"
+
+# Clear FILE-based credential caches
+sudo rm -f /tmp/krb5cc*
+
+print_yellow "Note: This removes ALL FILE-based credential caches including system ones - they will be recreated on next deploy"
 
 # Clean up logs
 print_yellow "Cleaning up Kubernetes logs..."

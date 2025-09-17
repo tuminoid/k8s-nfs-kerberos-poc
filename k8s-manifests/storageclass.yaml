@@ -9,3 +9,5 @@ mountOptions:
   - sec=krb5
   - hard
   - nolock
+  - timeo=600
+  - retrans=2

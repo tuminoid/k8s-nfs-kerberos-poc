@@ -101,17 +101,17 @@ echo "Shared NFS directory with Kerberos authentication" > /exports/shared/readm
 # Configure NFS exports with Kerberos
 cat > /etc/exports <<EOF
 # NFSv4 root
-/exports *(rw,sync,no_subtree_check,no_root_squash,fsid=0,sec=sys:krb5:krb5i:krb5p)
+/exports *(rw,sync,no_subtree_check,fsid=0,sec=sys:krb5:krb5i:krb5p)
 
 # Shared directory - accessible by all authenticated users
-/exports/shared *(rw,sync,no_subtree_check,no_root_squash,sec=sys:krb5:krb5i:krb5p)
+/exports/shared *(rw,sync,no_subtree_check,sec=sys:krb5:krb5i:krb5p)
 EOF
 
 # Add user home directory exports dynamically
 for user in "${USERS[@]}"; do
     cat >> /etc/exports <<EOF
 # User home directory for ${user}
-/exports/home/${user} *(rw,sync,no_subtree_check,no_root_squash,sec=sys:krb5:krb5i:krb5p)
+/exports/home/${user} *(rw,sync,no_subtree_check,sec=sys:krb5:krb5i:krb5p)
 EOF
 done
 

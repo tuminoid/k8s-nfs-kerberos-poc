@@ -8,22 +8,23 @@ metadata:
     nri.io/kerberos-uid: "10003"
     nri.io/kerberos-gid: "5003"
     nri.io/kerberos-fsid: "5003"
+    nri.io/kerberos-scenario: "no sidecar"
 spec:
   securityContext:
     runAsUser: 10003
     runAsGroup: 5003
     fsGroup: 5003
   containers:
-  # Kerberos sidecar for credential management
-  - name: krb5-sidecar
-    image: krb5-sidecar:latest
+  # Main NFS client container
+  - name: nfs-client
+    image: nfs-kerberos-client:latest
     imagePullPolicy: Never
     securityContext:
       runAsUser: 10003
       runAsGroup: 5003
     env:
     - name: KRB5CCNAME
-      value: "KCM:"
+      value: "FILE:/tmp/krb5cc_10003"
     - name: KERBEROS_USER
       value: "user10003"
     - name: KERBEROS_REALM
@@ -42,48 +43,9 @@ spec:
           name: service-hostnames
           key: NFS_HOSTNAME
     - name: KERBEROS_RENEWAL_TIME
-      value: "300"  # 5 min for testing
-    volumeMounts:
-    - name: keytabs
-      mountPath: /etc/keytabs
-      readOnly: true
-    - name: krb5-config
-      mountPath: /etc/krb5.conf
-      readOnly: true
-    - name: kcm-socket
-      mountPath: /var/run/.heim_org.h5l.kcm-socket
-    lifecycle:
-      preStop:
-        exec:
-          command: ["/usr/bin/kdestroy"]
-  # Main NFS client container
-  - name: nfs-client
-    image: nfs-kerberos-client:latest
-    imagePullPolicy: Never
-    securityContext:
-      runAsUser: 10003
-      runAsGroup: 5003
-    env:
-    - name: KRB5CCNAME
-      value: "KCM:"
-    - name: KERBEROS_USER
-      value: "user10003"
-    - name: KERBEROS_REALM
-      valueFrom:
-        configMapKeyRef:
-          name: service-hostnames
-          key: KERBEROS_REALM
-    - name: KDC_HOSTNAME
-      valueFrom:
-        configMapKeyRef:
-          name: service-hostnames
-          key: KDC_HOSTNAME
-    - name: NFS_HOSTNAME
-      valueFrom:
-        configMapKeyRef:
-          name: service-hostnames
-          key: NFS_HOSTNAME
-    command: ["/usr/local/bin/entrypoint.sh"]
+      value: "300"
+    - name: NFS_WRITE_INTERVAL
+      value: "120"
     volumeMounts:
     - name: nfs-home
       mountPath: /home
@@ -93,8 +55,8 @@ spec:
     - name: krb5-config
       mountPath: /etc/krb5.conf
       readOnly: true
-    - name: kcm-socket
-      mountPath: /var/run/.heim_org.h5l.kcm-socket
+    - name: ccache
+      mountPath: /tmp
   volumes:
   - name: nfs-home
     persistentVolumeClaim:
@@ -107,8 +69,8 @@ spec:
     hostPath:
       path: /etc/krb5.conf
       type: File
-  - name: kcm-socket
+  - name: ccache
     hostPath:
-      path: /var/run/.heim_org.h5l.kcm-socket
-      type: Socket
+      path: /tmp
+      type: Directory
   restartPolicy: Always

@@ -64,10 +64,10 @@ print_yellow "Build NFS Kerberos client Docker image..."
 docker build -t nfs-kerberos-client:latest containers/nfs-client/
 print_green "✓ NFS Kerberos client image built"
 
-# Build KCM sidecar Docker image
-print_yellow "Build KCM sidecar Docker image..."
+# Build Kerberos sidecar Docker image
+print_yellow "Build Kerberos sidecar Docker image..."
 docker build -t krb5-sidecar:latest containers/krb5-sidecar/
-print_green "✓ KCM sidecar image built"
+print_green "✓ Kerberos sidecar image built"
 
 # Import images to containerd for Kubernetes
 docker save nfs-kerberos-client:latest | sudo ctr -n k8s.io images import -
@@ -228,7 +228,6 @@ unset KRB5CCNAME
 
 # Start the system credentials service if keytab is available
 sudo systemctl start kerberos-system-creds 2>/dev/null || true
-
 print_green "✓ System credentials initialized"
 
 # Ensure required daemons are running (they sometimes stop after cluster operations)
@@ -236,7 +235,7 @@ print_yellow "Restarting critical daemons to ensure fresh state..."
 
 # Restart daemons to ensure they're running with fresh configuration
 # (These should already be enabled by install-k8s.sh)
-sudo systemctl restart rpcbind rpc-gssd kcm || true
+sudo systemctl restart rpcbind rpc-gssd || true
 sudo systemctl start rpc-gssd || true
 
 print_green "✓ Critical daemons restarted"
@@ -289,10 +288,8 @@ EOF
 done
 print_green "✓ Persistent volume claims deployed"
 
-# Deploy client pods with KCM sidecar (they now use configmap for hostnames)
+# Deploy client pods with FILE-based credentials (they now use configmap for hostnames)
 for user in "${USERS[@]}"; do
     kubectl apply -f "k8s-manifests/client-${user}.yaml"
 done
-print_green "✓ KCM-based NFS client pods deployed"
-
-print_green "✓ Deployment complete!"
+print_green "✓ FILE-based NFS client pods deployed"

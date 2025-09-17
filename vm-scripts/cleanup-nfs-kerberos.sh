@@ -24,7 +24,6 @@ print_yellow "Starting NFS and Kerberos cleanup..."
 # Stop and clean up local NFS/Kerberos processes
 print_yellow "Stopping local Kerberos and NFS processes..."
 sudo pkill -f rpc.gssd || true
-sudo pkill -f kcm || true
 sudo umount /var/lib/nfs/rpc_pipefs 2>/dev/null || true
 
 # Stop NFS and Kerberos services

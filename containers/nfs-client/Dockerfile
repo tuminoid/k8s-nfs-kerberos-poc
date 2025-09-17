@@ -18,14 +18,6 @@ RUN apt-get update && \
         iputils-ping \
     && rm -rf /var/lib/apt/lists/*
 
-# Create users with correct UIDs/GIDs to match the Kerberos users
-RUN groupadd -g 5002 group10002 && \
-    groupadd -g 5003 group10003 && \
-    groupadd -g 5004 group10004 && \
-    useradd -u 10002 -g 5002 -m -s /bin/bash user10002 && \
-    useradd -u 10003 -g 5003 -m -s /bin/bash user10003 && \
-    useradd -u 10004 -g 5004 -m -s /bin/bash user10004
-
 # Create a directory for mounting keytabs
 RUN mkdir -p /etc/keytabs && chmod 755 /etc/keytabs
 

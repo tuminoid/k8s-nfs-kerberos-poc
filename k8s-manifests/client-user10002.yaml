@@ -8,6 +8,7 @@ metadata:
     nri.io/kerberos-uid: "10002"
     nri.io/kerberos-gid: "5002"
     nri.io/kerberos-fsid: "5002"
+    nri.io/kerberos-scenario: "sidecar + client all info / 3 minute refresh"
 spec:
   securityContext:
     runAsUser: 10002
@@ -23,7 +24,7 @@ spec:
       runAsGroup: 5002
     env:
     - name: KRB5CCNAME
-      value: "KCM:"
+      value: "FILE:/tmp/krb5cc_10002"
     - name: KERBEROS_USER
       value: "user10002"
     - name: KERBEROS_REALM
@@ -42,7 +43,7 @@ spec:
           name: service-hostnames
           key: NFS_HOSTNAME
     - name: KERBEROS_RENEWAL_TIME
-      value: "300"  # 5 min for testing
+      value: "180"  # 3 minutes
     volumeMounts:
     - name: keytabs
       mountPath: /etc/keytabs
@@ -50,8 +51,8 @@ spec:
     - name: krb5-config
       mountPath: /etc/krb5.conf
       readOnly: true
-    - name: kcm-socket
-      mountPath: /var/run/.heim_org.h5l.kcm-socket
+    - name: ccache
+      mountPath: /tmp
     lifecycle:
       preStop:
         exec:
@@ -65,7 +66,7 @@ spec:
       runAsGroup: 5002
     env:
     - name: KRB5CCNAME
-      value: "KCM:"
+      value: "FILE:/tmp/krb5cc_10002"
     - name: KERBEROS_USER
       value: "user10002"
     - name: KERBEROS_REALM
@@ -83,6 +84,8 @@ spec:
         configMapKeyRef:
           name: service-hostnames
           key: NFS_HOSTNAME
+    - name: NFS_WRITE_INTERVAL
+      value: "60"
     command: ["/usr/local/bin/entrypoint.sh"]
     volumeMounts:
     - name: nfs-home
@@ -93,8 +96,8 @@ spec:
     - name: krb5-config
       mountPath: /etc/krb5.conf
       readOnly: true
-    - name: kcm-socket
-      mountPath: /var/run/.heim_org.h5l.kcm-socket
+    - name: ccache
+      mountPath: /tmp
   volumes:
   - name: nfs-home
     persistentVolumeClaim:
@@ -107,8 +110,8 @@ spec:
     hostPath:
       path: /etc/krb5.conf
       type: File
-  - name: kcm-socket
+  - name: ccache
     hostPath:
-      path: /var/run/.heim_org.h5l.kcm-socket
-      type: Socket
+      path: /tmp
+      type: Directory
   restartPolicy: Always
