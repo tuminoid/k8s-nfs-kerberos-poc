@@ -44,7 +44,7 @@ type plugin struct {
 
 func (p *plugin) CreateContainer(_ context.Context, pod *api.PodSandbox, container *api.Container) (*api.ContainerAdjustment, []*api.ContainerUpdate, error) {
 	var uid, gid, fsid uint64
-	var username, realm, kdc, nfs string
+	var ccname, username, realm, kdc, nfs string
 	enabled := false
 	renewal := false
 
@@ -83,6 +83,9 @@ func (p *plugin) CreateContainer(_ context.Context, pod *api.PodSandbox, contain
 		k, v := parts[0], parts[1]
 
 		switch k {
+		case "KRB5CCNAME":
+			ccname = v
+			fmt.Printf("%s: %s\n", k, ccname)
 		case "KERBEROS_USER":
 			username = v
 			fmt.Printf("%s: %s\n", k, username)
@@ -112,16 +115,16 @@ func (p *plugin) CreateContainer(_ context.Context, pod *api.PodSandbox, contain
 		fmt.Printf("%s: uid/gid/fsid annotation missing\n", ctrName)
 		return nil, nil, nil
 	}
-	if username == "" || realm == "" || kdc == "" || nfs == "" {
-		fmt.Printf("%s: username, realm, kdc, or nfs hostname missing\n", ctrName)
+	if username == "" || realm == "" || kdc == "" || nfs == "" || ccname == "" {
+		fmt.Printf("%s: username, realm, kdc, nfs, or ccname missing\n", ctrName)
 		return nil, nil, nil
 	}
 
 	// tbd - how do we pass the above to the script? exec the hook script?
 	fmt.Printf("%s:WILL RUN KERBEROS SETUP SCRIPT HERE\n", ctrName)
-	// hook script name from hook json?
+	// TODO: hook script name from hook json?
 	// #nosec G204:gosec
-	cmd := exec.Command("/opt/nri-hooks/kerberos.sh", fmt.Sprintf("%d", uid), fmt.Sprintf("%d", gid), fmt.Sprintf("%d", fsid), username, realm, kdc, nfs)
+	cmd := exec.Command("/opt/nri-hooks/kerberos.sh", fmt.Sprintf("%d", uid), fmt.Sprintf("%d", gid), fmt.Sprintf("%d", fsid), username, realm, kdc, nfs, ccname)
 
 	// nolint:errcheck
 	cmd.CombinedOutput()

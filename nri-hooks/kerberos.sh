@@ -11,10 +11,11 @@ FSID="${3:?}"
 USERNAME="${4:?}"
 REALM="${5:?}"
 KDC_HOSTNAME="${6:?}"
-NFS_HOSTNAME="${7:?}"  # Not used here, but could be for mount options
+NFS_HOSTNAME="${7:?}"
+KRB5CCNAME="${8:?}"
 
 log() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') $*" | tee -a /var/log/nri-kerberos.log
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [${USER_ID}] $*" | tee -a /var/log/nri-kerberos.log
 }
 
 log "Setting up Kerberos authentication for ${USERNAME} (UID: ${USER_ID}, GID: ${GROUP_ID})"
@@ -50,22 +51,23 @@ log "Set keytab permissions"
 chmod 600 "${KEYTAB_FILE}"
 chown "${USER_ID}:${GROUP_ID}" "${KEYTAB_FILE}"
 
-# Perform kinit as root, then chown to correct UID/GID
-log "Performing kinit for ${USERNAME}"
-
-# Create credential cache using the standard location
+# Always use FILE-based credential cache
 CC_FILE="/tmp/krb5cc_${USER_ID}"
+export KRB5CCNAME=${KRB5CCNAME:-"FILE:${CC_FILE}"}
+log "Using FILE credential cache: ${KRB5CCNAME}"
 
 # Run kinit as root with the keytab
-if KRB5CCNAME="FILE:${CC_FILE}" kinit -k -t "${KEYTAB_FILE}" "${USERNAME}@${REALM}"; then
+log "Performing kinit for ${USERNAME} (${USER_ID}:${GROUP_ID} + ${FSID})"
+if kinit -k -t "${KEYTAB_FILE}" "${USERNAME}@${REALM}"; then
     log "Successfully authenticated ${USERNAME} with Kerberos"
 
     # Change ownership to the correct UID/GID (even without local users)
     chown "${USER_ID}:${GROUP_ID}" "${CC_FILE}"
+    chmod 600 "${CC_FILE}"
     log "Set credential cache ownership to ${USER_ID}:${GROUP_ID}"
 
     # Verify we have tickets
-    if KRB5CCNAME="FILE:${CC_FILE}" klist >/dev/null 2>&1; then
+    if klist >/dev/null 2>&1; then
         log "Verified Kerberos tickets for ${USERNAME}"
     else
         log "WARNING: kinit succeeded but no tickets found"
@@ -76,15 +78,13 @@ else
 fi
 
 log "Successfully completed pre-create setup for ${USERNAME}"
-
 exit 0
 
-# make separate script for this
+# make separate script for this ?
 if [[ "${1:-}" = "stop" ]]; then
     # This does not really work if multiple pods for same user are created
     # TBD: drop stop handling?
     log "Nuking Kerberos tickets for ${USERNAME}"
-    rm -f "${USER_FLAG_DIR}/${USERNAME}.created"
     KRB5CCNAME="FILE:${CC_FILE}" kdestroy || true
     rm -f /tmp/krb5cc_${USER_ID}*
 fi

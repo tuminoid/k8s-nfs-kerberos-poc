@@ -8,22 +8,23 @@ metadata:
     nri.io/kerberos-uid: "10004"
     nri.io/kerberos-gid: "5004"
     nri.io/kerberos-fsid: "5004"
+    nri.io/kerberos-scenario: "ccache mount + cronjob renewal at 5 mins"
 spec:
   securityContext:
     runAsUser: 10004
     runAsGroup: 5004
     fsGroup: 5004
   containers:
-  # Kerberos sidecar for credential management
-  - name: krb5-sidecar
-    image: krb5-sidecar:latest
+  # Main NFS client container
+  - name: nfs-client
+    image: nfs-kerberos-client:latest
     imagePullPolicy: Never
     securityContext:
       runAsUser: 10004
       runAsGroup: 5004
     env:
     - name: KRB5CCNAME
-      value: "KCM:"
+      value: "FILE:/tmp/krb5cc_10004"
     - name: KERBEROS_USER
       value: "user10004"
     - name: KERBEROS_REALM
@@ -42,47 +43,9 @@ spec:
           name: service-hostnames
           key: NFS_HOSTNAME
     - name: KERBEROS_RENEWAL_TIME
-      value: "300"  # 5 min for testing
-    volumeMounts:
-    - name: keytabs
-      mountPath: /etc/keytabs
-      readOnly: true
-    - name: krb5-config
-      mountPath: /etc/krb5.conf
-      readOnly: true
-    - name: kcm-socket
-      mountPath: /var/run/.heim_org.h5l.kcm-socket
-    lifecycle:
-      preStop:
-        exec:
-          command: ["/usr/bin/kdestroy"]
-  # Main NFS client container
-  - name: nfs-client
-    image: nfs-kerberos-client:latest
-    imagePullPolicy: Never
-    #securityContext:
-    #  runAsUser: 10004
-    #  runAsGroup: 5004
-    env:
-    - name: KRB5CCNAME
-      value: "KCM:"
-    - name: KERBEROS_USER
-      value: "user10004"
-    - name: KERBEROS_REALM
-      valueFrom:
-        configMapKeyRef:
-          name: service-hostnames
-          key: KERBEROS_REALM
-    - name: KDC_HOSTNAME
-      valueFrom:
-        configMapKeyRef:
-          name: service-hostnames
-          key: KDC_HOSTNAME
-    - name: NFS_HOSTNAME
-      valueFrom:
-        configMapKeyRef:
-          name: service-hostnames
-          key: NFS_HOSTNAME
+      value: "300"
+    - name: NFS_WRITE_INTERVAL
+      value: "180"
     command: ["/usr/local/bin/entrypoint.sh"]
     volumeMounts:
     - name: nfs-home
@@ -93,8 +56,8 @@ spec:
     - name: krb5-config
       mountPath: /etc/krb5.conf
       readOnly: true
-    - name: kcm-socket
-      mountPath: /var/run/.heim_org.h5l.kcm-socket
+    - name: ccache
+      mountPath: /tmp
   volumes:
   - name: nfs-home
     persistentVolumeClaim:
@@ -107,8 +70,120 @@ spec:
     hostPath:
       path: /etc/krb5.conf
       type: File
-  - name: kcm-socket
+  - name: ccache
     hostPath:
-      path: /var/run/.heim_org.h5l.kcm-socket
-      type: Socket
+      path: /tmp
+      type: Directory
   restartPolicy: Always
+
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: kerberos-renewal-user10004
+  namespace: default
+spec:
+  schedule: "*/5 * * * *"  # Every 5 minutes
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          annotations:
+            nri.io/kerberos-auth: "enabled"
+            nri.io/kerberos-uid: "10004"
+            nri.io/kerberos-gid: "5004"
+            nri.io/kerberos-fsid: "5004"
+            nri.io/kerberos-scenario: "cronjob renewal for user10004"
+        spec:
+          securityContext:
+            runAsUser: 10004
+            runAsGroup: 5004
+            fsGroup: 5004
+          restartPolicy: OnFailure
+          containers:
+          - name: kerberos-renewer
+            image: krb5-sidecar:latest
+            imagePullPolicy: Never
+            securityContext:
+              runAsUser: 10004
+              runAsGroup: 5004
+            env:
+            - name: KRB5CCNAME
+              value: "FILE:/tmp/krb5cc_10004"
+            - name: KERBEROS_USER
+              value: "user10004"
+            - name: KERBEROS_REALM
+              valueFrom:
+                configMapKeyRef:
+                  name: service-hostnames
+                  key: KERBEROS_REALM
+            - name: KDC_HOSTNAME
+              valueFrom:
+                configMapKeyRef:
+                  name: service-hostnames
+                  key: KDC_HOSTNAME
+            - name: NFS_HOSTNAME
+              valueFrom:
+                configMapKeyRef:
+                  name: service-hostnames
+                  key: NFS_HOSTNAME
+            command: ["/bin/bash"]
+            args:
+            - -c
+            - |
+              set -eu
+
+              USERNAME=${KERBEROS_USER:-user10004}
+              REALM=${KERBEROS_REALM:-EXAMPLE.COM}
+              USER_ID=$(id -u)
+              export KRB5CCNAME=${KRB5CCNAME:-"FILE:/tmp/krb5cc_${USER_ID}"}
+
+              echo "=== Kerberos Renewal CronJob for ${USERNAME}@${REALM} ==="
+              echo "Timestamp: $(date)"
+              echo "Using FILE credential cache: ${KRB5CCNAME}"
+
+              echo "Current tickets before renewal:"
+              klist || echo "No existing tickets found"
+
+              echo "Attempting credential renewal..."
+              if kinit -R; then
+                  echo "✓ Credentials renewed successfully at $(date)"
+              else
+                  echo "⚠ Renewal failed, getting fresh ticket..."
+                  if kinit -k -t "/etc/keytabs/${USERNAME}.keytab" "${USERNAME}@${REALM}"; then
+                      echo "✓ Fresh ticket obtained at $(date)"
+                  else
+                      echo "✗ Failed to get fresh ticket at $(date)"
+                      exit 1
+                  fi
+              fi
+
+              echo "Current tickets after renewal:"
+              klist
+
+              echo "=== Renewal completed successfully at $(date) ==="
+            volumeMounts:
+            - name: keytabs
+              mountPath: /etc/keytabs
+              readOnly: true
+            - name: krb5-config
+              mountPath: /etc/krb5.conf
+              readOnly: true
+            - name: ccache
+              mountPath: /tmp
+          volumes:
+          - name: keytabs
+            hostPath:
+              path: /etc/keytabs
+              type: Directory
+          - name: krb5-config
+            hostPath:
+              path: /etc/krb5.conf
+              type: File
+          - name: ccache
+            hostPath:
+              path: /tmp
+              type: Directory

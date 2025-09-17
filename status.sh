@@ -16,8 +16,14 @@ print_yellow() { echo -e "${YELLOW}$*${NC}"; }
 
 # Configuration - detect from configmap
 if kubectl get configmap service-hostnames &> /dev/null; then
-    KDC_SERVER=$(kubectl get configmap service-hostnames -o jsonpath='{.data.KDC_HOSTNAME}' 2>/dev/null || echo "kdc.example.com")
-    NFS_SERVER=$(kubectl get configmap service-hostnames -o jsonpath='{.data.NFS_HOSTNAME}' 2>/dev/null || echo "nfs.example.com")
+    KDC_SERVER=$(kubectl get configmap service-hostnames -o jsonpath='{.data.KDC_HOSTNAME}' 2>/dev/null)
+    NFS_SERVER=$(kubectl get configmap service-hostnames -o jsonpath='{.data.NFS_HOSTNAME}' 2>/dev/null)
+
+    if [[ -z "${KDC_SERVER}" || -z "${NFS_SERVER}" ]]; then
+        print_red "ERROR: Failed to read hostnames from ConfigMap"
+        echo "Make sure the deployment has been run properly"
+        exit 1
+    fi
 else
     print_red "ERROR: service-hostnames ConfigMap not found"
     echo "Make sure the deployment has been run and ConfigMap is created"
@@ -78,7 +84,7 @@ test_nfs_access() {
     echo "Testing user10002 home directory access:"
 
     if [[ "${pod_status}" = "Running" ]]; then
-        kubectl exec client-user10002 -- ls -la /home/ 2>/dev/null && \
+        kubectl exec client-user10002 -c nfs-client -- ls -la /home/ 2>/dev/null && \
             print_green "✓ NFS mount accessible" || \
             print_red "✗ Failed to access NFS"
     else
@@ -143,18 +149,32 @@ echo
 
 SETUP_COMPLETE=true
 
-# Check if KCM service is configured
-if systemctl list-unit-files | grep &>/dev/null "kcm.service"; then
-    if systemctl is-enabled --quiet kcm 2>/dev/null; then
-        print_green "✓ KCM service configured and enabled"
+# Check NRI integration (critical component)
+echo "Checking NRI configuration..."
+if sudo grep -q "disable = false" /etc/containerd/config.toml 2>/dev/null && \
+   sudo grep -A5 -B5 "nri" /etc/containerd/config.toml 2>/dev/null | grep -q "disable = false"; then
+    print_green "✓ NRI is enabled in containerd"
+
+    # Check if hook scripts are deployed
+    if [[ -f /opt/nri-hooks/kerberos.sh ]]; then
+        print_green "✓ NRI hook scripts deployed"
     else
-        print_yellow "⚠ KCM service exists but not enabled"
-        echo "  Fix: sudo systemctl enable kcm"
+        print_red "✗ NRI enabled but hook scripts not deployed (CRITICAL)"
+        echo "  Fix: Deploy hook scripts to /opt/nri-hooks/"
         SETUP_COMPLETE=false
     fi
 else
-    print_red "✗ KCM service not configured"
-    echo "  Fix: Run vm-scripts/install-k8s.sh first"
+    print_red "✗ NRI not enabled in containerd (CRITICAL)"
+    echo "  Fix: Enable NRI in /etc/containerd/config.toml"
+    SETUP_COMPLETE=false
+fi
+
+# Check if credential cache directory is accessible
+if [[ -d /tmp ]] && [[ -w /tmp ]]; then
+    print_green "✓ Credential cache directory (/tmp) accessible"
+else
+    print_red "✗ Credential cache directory not accessible"
+    echo "  Fix: Ensure /tmp directory exists and is writable"
     SETUP_COMPLETE=false
 fi
 
@@ -207,12 +227,12 @@ else
     echo "  Fix: sudo systemctl start rpc-gssd"
 fi
 
-# Check KCM daemon (for credential sharing)
-if ls -la /var/run/ | grep &>/dev/null kcm; then
-    print_green "✓ KCM socket available"
+# Check FILE credential cache availability
+if [[ -f /tmp/krb5cc_0 ]] || sudo ls /tmp/krb5cc_* &>/dev/null; then
+    print_green "✓ FILE credential caches available"
 else
-    print_red "✗ KCM socket not found"
-    echo "  Fix: /usr/sbin/kcm --detach"
+    print_yellow "⚠ No FILE credential caches found in /tmp"
+    echo "  Note: Credentials may be created dynamically"
 fi
 
 # Check kernel modules
@@ -247,20 +267,12 @@ else
     echo "  Fix: echo 'Domain = example.com' | sudo tee -a /etc/idmapd.conf"
 fi
 
-# Check system credentials for kubelet
+# Check system credentials for NFS service
 if sudo klist -c FILE:/tmp/krb5cc_0 &>/dev/null; then
     print_green "✓ System Kerberos credentials available"
 else
     print_red "✗ No system Kerberos credentials"
-    echo "  Fix: sudo kinit -kt /etc/keytabs/user10002.keytab user10002@EXAMPLE.COM"
+    echo "  Fix: sudo kinit -kt /etc/krb5.keytab nfs/\${NFS_SERVER}@EXAMPLE.COM"
 fi
 
-echo
-
-echo "Logs from user10002 krb5-sidecar:"
-kubectl logs client-user10002 -c krb5-sidecar
-echo
-
-echo "Logs from user10002 nfs-client:"
-kubectl logs client-user10002 -c nfs-client
 echo

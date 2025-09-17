@@ -1,9 +1,8 @@
 FROM ubuntu:24.04
 
-# Install Kerberos packages including KCM
+# Install Kerberos packages for FILE-based credentials
 RUN apt-get update && apt-get install -y \
     krb5-user \
-    heimdal-kcm \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy entrypoint script

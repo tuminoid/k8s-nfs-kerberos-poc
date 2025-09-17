@@ -46,6 +46,7 @@ echo "NFS Server IP: ${NFS_SERVER_IP} -> ${NFS_HOSTNAME}"
 
 # Configuration
 K8S_HOSTNAME="k8s-${HOST_IP}.nip.io"
+REALM="EXAMPLE.COM"
 
 print_yellow "=== Setting up Kubernetes Node Prerequisites ==="
 echo "Detected Host IP: ${HOST_IP}"
@@ -129,7 +130,7 @@ apt-get install -y \
     rpcbind \
     libkrb5-3 \
     libgssapi-krb5-2 \
-    heimdal-kcm > /dev/null 2>&1
+    >/dev/null 2>&1
 
 # Configure NFSv4 domain for proper user mapping (ensure it persists)
 print_yellow "Configuring NFSv4 domain mapping..."
@@ -150,9 +151,32 @@ auth_rpcgss
 rpcsec_gss_krb5
 EOF
 
+# explicitly set some gssd options
+# context-timeout is 1800 = 30 min, same as ticket lifetime
+sed -i \
+    -e 's/^# context-timeout=0/context-timeout=1800/' \
+    -e 's/^# rpc-timeout=5/rpc-timeout=10/' \
+    -e 's/^# upcall-timeout=30/upcall-timeout=60/' \
+    -e 's/^# use-machine-creds=1/use-machine-creds=1/' \
+    -e "s/^# preferred-realm=/preferred-realm=${REALM}/" \
+    /etc/nfs.conf
+cat >> /etc/nfs.conf << EOF
+[nfsmount]
+retry=2
+EOF
+
 # Load kernel modules now
 modprobe auth_rpcgss || true
 modprobe rpcsec_gss_krb5 || true
+
+# Set up RPC pipefs and ensure it mounts on boot
+mkdir -p /var/lib/nfs/rpc_pipefs
+mount -t rpc_pipefs sunrpc /var/lib/nfs/rpc_pipefs || true
+
+# Add RPC pipefs to fstab for persistent mounting
+if ! grep -q "rpc_pipefs" /etc/fstab; then
+    echo "sunrpc /var/lib/nfs/rpc_pipefs rpc_pipefs defaults 0 0" >> /etc/fstab
+fi
 
 # Enable and start required services (enable ensures auto-start on boot)
 systemctl enable --now rpcbind
@@ -164,74 +188,130 @@ systemctl enable --now nfs-client.target
 # Start the static services now for immediate availability
 systemctl start rpc-gssd nfs-idmapd &>/dev/null || true
 
-# Set up RPC pipefs and ensure it mounts on boot
-mkdir -p /var/lib/nfs/rpc_pipefs
-mount -t rpc_pipefs sunrpc /var/lib/nfs/rpc_pipefs || true
+# create script to authenticate system credentials
+# Create the script file
+cat > /usr/local/bin/kerberos-system-auth.sh << 'EOF'
+#!/usr/bin/env bash
 
-# Add RPC pipefs to fstab for persistent mounting
-if ! grep -q "rpc_pipefs" /etc/fstab; then
-    echo "sunrpc /var/lib/nfs/rpc_pipefs rpc_pipefs defaults 0 0" >> /etc/fstab
+set -euo pipefail
+
+KEYTAB_FILE="/etc/krb5.keytab"
+LOG_TAG="kerberos-system-creds"
+export KRB5CCNAME=${KRB5CCNAME:-"FILE:/tmp/krb5cc_0"}
+
+log() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [$LOG_TAG] $*"
+}
+
+if [[ ! -f "${KEYTAB_FILE}" ]]; then
+    log "ERROR: Keytab file ${KEYTAB_FILE} not found"
+    exit 1
 fi
 
-# Create systemd service for KCM daemon (persistent across reboots)
-print_yellow "Setting up KCM daemon as systemd service..."
-cat > /etc/systemd/system/kcm.service << EOF
-[Unit]
-Description=Kerberos Credentials Manager
-After=network.target
+log "Starting Kerberos system authentication"
+log "Using keytab: ${KEYTAB_FILE}"
 
-[Service]
-Type=forking
-ExecStart=/usr/sbin/kcm --detach
-PIDFile=/var/run/kcm.pid
-Restart=always
-RestartSec=5
-KillMode=process
+# List what's in the keytab for debugging
+log "Keytab contents:"
+klist -k "${KEYTAB_FILE}" | while read line; do
+    log "  $line"
+done
 
-[Install]
-WantedBy=multi-user.target
+# Extract NFS principals and authenticate
+principals=$(klist -k "${KEYTAB_FILE}" | grep 'nfs/' | awk 'NF>1 {print $2}' | sort -u)
+
+if [[ -z "${principals}" ]]; then
+    log "ERROR: No NFS principals found in keytab"
+    log "Available principals:"
+    klist -k "${KEYTAB_FILE}" | grep -v "^Keytab" | grep -v "^----" | grep -v "^KVNO" | while read line; do
+        log "  $line"
+    done
+    exit 1
+fi
+
+# Authenticate each principal
+echo "${principals}" | while IFS= read -r principal; do
+    if [[ -n "${principal}" ]]; then
+        log "Processing principal: ${principal}"
+
+        # First try to renew existing credentials
+        if kinit -R "${principal}" 2>/dev/null; then
+            log "✓ Successfully renewed credentials for: ${principal}"
+        else
+            log "Renewal failed, re-authenticating with keytab for: ${principal}"
+            if kinit -k -t "${KEYTAB_FILE}" "${principal}"; then
+                log "✓ Successfully authenticated with keytab: ${principal}"
+            else
+                log "✗ Failed to authenticate: ${principal}"
+            fi
+        fi
+    fi
+done
+
+log "Kerberos system authentication completed"
+
+# Verify we have tickets
+if klist &>/dev/null; then
+    log "✓ Active Kerberos tickets:"
+    klist | while read line; do
+        log "  $line"
+    done
+else
+    log "✗ No active Kerberos tickets found"
+    exit 1
+fi
+
+# flush the rpc gssd cache to ensure it picks up new creds
+echo $(date +%s) > /proc/net/rpc/auth.rpcsec.context/flush
 EOF
-
-# Reload systemd and enable KCM service
-systemctl daemon-reload
-systemctl enable --now kcm
+chmod +x /usr/local/bin/kerberos-system-auth.sh
 
 # Create system credential service template (will be customized by deploy script)
-print_yellow "Setting up Kerberos system credentials service template..."
+print_yellow "Setting up Kerberos system credentials service and timer..."
 cat > /etc/systemd/system/kerberos-system-creds.service << EOF
 [Unit]
 Description=Initialize Kerberos System Credentials for NFS
-After=network-online.target rpc-gssd.service kcm.service
+After=network-online.target rpc-gssd.service
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-RemainAfterExit=yes
-ExecStart=/bin/bash -c "if [ -f /etc/krb5.keytab ]; then /usr/bin/kinit -k -t /etc/krb5.keytab \$(klist -k /etc/krb5.keytab | grep nfs/ | head -1 | awk '"'"'{print \$2}'"'"'); fi"
+ExecStart=/usr/local/bin/kerberos-system-auth.sh
 Environment=KRB5CCNAME=FILE:/tmp/krb5cc_0
 User=root
-
-[Install]
-WantedBy=multi-user.target
 EOF
 
+# Create timer to run every 20 minutes (tickets expire after 30min max)
+cat > /etc/systemd/system/kerberos-system-creds.timer << EOF
+[Unit]
+Description=Timer for Kerberos System Credentials Renewal
+Requires=kerberos-system-creds.service
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=4min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
+EOF
+
+# add -n to rpc.gssd
+sed -i -e '/^ExecStart=/ s/$/ -n/' /usr/lib/systemd/system/rpc-gssd.service
+
 systemctl daemon-reload
-systemctl enable kerberos-system-creds
+systemctl enable --now kerberos-system-creds.timer
+print_green "✓ System credentials service and timer configured"
 
-# Verify KCM socket exists
+# Verify system credential service is configured
 sleep 2
-if ls -la /var/run/ | grep -q kcm; then
-    print_green "✓ KCM daemon service enabled and socket available"
+if systemctl is-enabled --quiet kerberos-system-creds.timer 2>/dev/null; then
+    print_green "✓ System credentials service configured and enabled"
 else
-    print_red "Warning: KCM socket not found - may need manual restart"
+    print_red "Warning: System credentials service not properly configured"
 fi
-
-print_green "✓ System credentials service template configured"
-
 print_green "✓ Local node configured for NFS with Kerberos support"
 
-# Download Kerberos configuration from KDC
-print_yellow "Downloading Kerberos configuration from KDC..."
 # Create keytabs directory and clean up any existing Kerberos files
 mkdir -p /etc/keytabs
 rm -f /etc/krb5.conf
@@ -242,9 +322,6 @@ wget -O /etc/krb5.conf "http://${KDC_HOSTNAME}:8080/krb5.conf" || {
     echo "Make sure the KDC is running and accessible at ${KDC_HOSTNAME}:8080"
     exit 1
 }
-
-# Using NRI for dynamic user keytab management
-print_yellow "Using NRI for dynamic user keytab management"
 
 print_green "Kubernetes Node Prerequisites Setup Complete"
 
